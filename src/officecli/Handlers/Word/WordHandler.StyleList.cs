@@ -1,0 +1,234 @@
+// Copyright 2025 OfficeCli (officecli.ai)
+// SPDX-License-Identifier: Apache-2.0
+
+using DocumentFormat.OpenXml;
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Wordprocessing;
+using OfficeCli.Core;
+
+namespace OfficeCli.Handlers;
+
+public partial class WordHandler
+{
+    // ==================== Style Inheritance ====================
+
+    private RunProperties ResolveEffectiveRunProperties(Run run, Paragraph para)
+    {
+        var effective = new RunProperties();
+
+        // 1. Start with docDefaults rPr
+        var docDefaults = _doc.MainDocumentPart?.StyleDefinitionsPart?.Styles?.DocDefaults;
+        var defaultRPr = docDefaults?.RunPropertiesDefault?.RunPropertiesBaseStyle;
+        if (defaultRPr != null)
+            MergeRunProperties(effective, defaultRPr);
+
+        // 2. Walk paragraph style basedOn chain (collect in order, apply from base to derived)
+        var styleId = para.ParagraphProperties?.ParagraphStyleId?.Val?.Value;
+        if (styleId != null)
+        {
+            var chain = new List<Style>();
+            var visited = new HashSet<string>();
+            var currentStyleId = styleId;
+            while (currentStyleId != null && visited.Add(currentStyleId))
+            {
+                var style = _doc.MainDocumentPart?.StyleDefinitionsPart?.Styles
+                    ?.Elements<Style>().FirstOrDefault(s => s.StyleId?.Value == currentStyleId);
+                if (style == null) break;
+                chain.Add(style);
+                currentStyleId = style.BasedOn?.Val?.Value;
+            }
+            // Apply from base to derived (reverse order)
+            for (int i = chain.Count - 1; i >= 0; i--)
+            {
+                var styleRPr = chain[i].StyleRunProperties;
+                if (styleRPr != null)
+                    MergeRunProperties(effective, styleRPr);
+            }
+        }
+
+        // 3. Apply run's own rPr (highest priority)
+        if (run.RunProperties != null)
+            MergeRunProperties(effective, run.RunProperties);
+
+        return effective;
+    }
+
+    private static void MergeRunProperties(RunProperties target, OpenXmlElement source)
+    {
+        // Merge each known property: source overwrites target
+        var srcFonts = source.GetFirstChild<RunFonts>();
+        if (srcFonts != null)
+            target.RunFonts = srcFonts.CloneNode(true) as RunFonts;
+
+        var srcSize = source.GetFirstChild<FontSize>();
+        if (srcSize != null)
+            target.FontSize = srcSize.CloneNode(true) as FontSize;
+
+        var srcBold = source.GetFirstChild<Bold>();
+        if (srcBold != null)
+            target.Bold = srcBold.CloneNode(true) as Bold;
+
+        var srcItalic = source.GetFirstChild<Italic>();
+        if (srcItalic != null)
+            target.Italic = srcItalic.CloneNode(true) as Italic;
+
+        var srcUnderline = source.GetFirstChild<Underline>();
+        if (srcUnderline != null)
+            target.Underline = srcUnderline.CloneNode(true) as Underline;
+
+        var srcStrike = source.GetFirstChild<Strike>();
+        if (srcStrike != null)
+            target.Strike = srcStrike.CloneNode(true) as Strike;
+
+        var srcColor = source.GetFirstChild<Color>();
+        if (srcColor != null)
+            target.Color = srcColor.CloneNode(true) as Color;
+
+        var srcHighlight = source.GetFirstChild<Highlight>();
+        if (srcHighlight != null)
+            target.Highlight = srcHighlight.CloneNode(true) as Highlight;
+    }
+
+    private static string? GetFontFromProperties(RunProperties? rProps)
+    {
+        if (rProps == null) return null;
+        var fonts = rProps.RunFonts;
+        return fonts?.EastAsia?.Value ?? fonts?.Ascii?.Value ?? fonts?.HighAnsi?.Value;
+    }
+
+    private static string? GetSizeFromProperties(RunProperties? rProps)
+    {
+        if (rProps == null) return null;
+        var size = rProps.FontSize?.Val?.Value;
+        if (size == null) return null;
+        return $"{int.Parse(size) / 2}pt";
+    }
+
+    // ==================== List / Numbering ====================
+
+    private string GetListPrefix(Paragraph para)
+    {
+        var numProps = para.ParagraphProperties?.NumberingProperties;
+        if (numProps == null) return "";
+
+        var numId = numProps.NumberingId?.Val?.Value;
+        var ilvl = numProps.NumberingLevelReference?.Val?.Value ?? 0;
+        if (numId == null || numId == 0) return "";
+
+        var indent = new string(' ', ilvl * 2);
+        var numFmt = GetNumberingFormat(numId.Value, ilvl);
+
+        return numFmt.ToLowerInvariant() switch
+        {
+            "bullet" => $"{indent}• ",
+            "decimal" => $"{indent}1. ",
+            "lowerletter" => $"{indent}a. ",
+            "upperletter" => $"{indent}A. ",
+            "lowerroman" => $"{indent}i. ",
+            "upperroman" => $"{indent}I. ",
+            _ => $"{indent}• "
+        };
+    }
+
+    private string GetNumberingFormat(int numId, int ilvl)
+    {
+        var numbering = _doc.MainDocumentPart?.NumberingDefinitionsPart?.Numbering;
+        if (numbering == null) return "bullet";
+
+        var numInstance = numbering.Elements<NumberingInstance>()
+            .FirstOrDefault(n => n.NumberID?.Value == numId);
+        if (numInstance == null) return "bullet";
+
+        var abstractNumId = numInstance.AbstractNumId?.Val?.Value;
+        if (abstractNumId == null) return "bullet";
+
+        var abstractNum = numbering.Elements<AbstractNum>()
+            .FirstOrDefault(a => a.AbstractNumberId?.Value == abstractNumId);
+        if (abstractNum == null) return "bullet";
+
+        var level = abstractNum.Elements<Level>()
+            .FirstOrDefault(l => l.LevelIndex?.Value == ilvl);
+
+        var numFmt = level?.NumberingFormat?.Val;
+        if (numFmt == null || !numFmt.HasValue) return "bullet";
+        return numFmt.InnerText ?? "bullet";
+    }
+
+    private void ApplyListStyle(Paragraph para, string listStyleValue)
+    {
+        var mainPart = _doc.MainDocumentPart!;
+        var numberingPart = mainPart.NumberingDefinitionsPart;
+        if (numberingPart == null)
+        {
+            numberingPart = mainPart.AddNewPart<NumberingDefinitionsPart>();
+            numberingPart.Numbering = new Numbering();
+        }
+        var numbering = numberingPart.Numbering
+            ?? throw new InvalidOperationException("Corrupt file: numbering data missing");
+
+        // Determine the next available IDs
+        var maxAbstractId = numbering.Elements<AbstractNum>()
+            .Select(a => a.AbstractNumberId?.Value ?? 0).DefaultIfEmpty(-1).Max() + 1;
+        var maxNumId = numbering.Elements<NumberingInstance>()
+            .Select(n => n.NumberID?.Value ?? 0).DefaultIfEmpty(0).Max() + 1;
+
+        var isBullet = listStyleValue.ToLowerInvariant() is "bullet" or "unordered" or "ul";
+
+        // Create abstract numbering definition
+        var abstractNum = new AbstractNum { AbstractNumberId = maxAbstractId };
+        abstractNum.AppendChild(new MultiLevelType { Val = MultiLevelValues.HybridMultilevel });
+
+        var bulletChars = new[] { "\u2022", "\u25E6", "\u25AA" }; // •, ◦, ▪
+
+        for (int lvl = 0; lvl < 3; lvl++)
+        {
+            var level = new Level { LevelIndex = lvl };
+            level.AppendChild(new StartNumberingValue { Val = 1 });
+
+            if (isBullet)
+            {
+                level.AppendChild(new NumberingFormat { Val = NumberFormatValues.Bullet });
+                level.AppendChild(new LevelText { Val = bulletChars[lvl % bulletChars.Length] });
+            }
+            else
+            {
+                var fmt = lvl switch
+                {
+                    0 => NumberFormatValues.Decimal,
+                    1 => NumberFormatValues.LowerLetter,
+                    _ => NumberFormatValues.LowerRoman
+                };
+                level.AppendChild(new NumberingFormat { Val = fmt });
+                level.AppendChild(new LevelText { Val = $"%{lvl + 1}." });
+            }
+
+            level.AppendChild(new LevelJustification { Val = LevelJustificationValues.Left });
+            level.AppendChild(new PreviousParagraphProperties(
+                new Indentation { Left = ((lvl + 1) * 720).ToString(), Hanging = "360" }
+            ));
+            abstractNum.AppendChild(level);
+        }
+
+        // Insert AbstractNum before any NumberingInstance elements
+        var firstNumInstance = numbering.GetFirstChild<NumberingInstance>();
+        if (firstNumInstance != null)
+            numbering.InsertBefore(abstractNum, firstNumInstance);
+        else
+            numbering.AppendChild(abstractNum);
+
+        // Create numbering instance
+        var numInstance = new NumberingInstance { NumberID = maxNumId };
+        numInstance.AppendChild(new AbstractNumId { Val = maxAbstractId });
+        numbering.AppendChild(numInstance);
+
+        numbering.Save();
+
+        // Apply to paragraph
+        var pProps = para.ParagraphProperties ?? para.PrependChild(new ParagraphProperties());
+        pProps.NumberingProperties = new NumberingProperties
+        {
+            NumberingId = new NumberingId { Val = maxNumId },
+            NumberingLevelReference = new NumberingLevelReference { Val = 0 }
+        };
+    }
+}

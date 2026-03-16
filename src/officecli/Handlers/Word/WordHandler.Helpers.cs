@@ -1,0 +1,273 @@
+// Copyright 2025 OfficeCli (officecli.ai)
+// SPDX-License-Identifier: Apache-2.0
+
+using System.Text;
+using DocumentFormat.OpenXml;
+using DocumentFormat.OpenXml.Wordprocessing;
+using OfficeCli.Core;
+using Vml = DocumentFormat.OpenXml.Vml;
+using DW = DocumentFormat.OpenXml.Drawing.Wordprocessing;
+using M = DocumentFormat.OpenXml.Math;
+
+namespace OfficeCli.Handlers;
+
+public partial class WordHandler
+{
+    // ==================== Private Helpers ====================
+
+    private static string GetParagraphText(Paragraph para)
+    {
+        return string.Concat(para.Descendants<Text>().Select(t => t.Text));
+    }
+
+    /// <summary>
+    /// Get paragraph text including inline math rendered as readable Unicode.
+    /// </summary>
+    private static string GetParagraphTextWithMath(Paragraph para)
+    {
+        var sb = new StringBuilder();
+        foreach (var child in para.ChildElements)
+        {
+            if (child is Run run)
+                sb.Append(GetRunText(run));
+            else if (child.LocalName == "oMath" || child is M.OfficeMath)
+                sb.Append(FormulaParser.ToReadableText(child));
+            else if (child is Hyperlink hyperlink)
+                sb.Append(string.Concat(hyperlink.Descendants<Text>().Select(t => t.Text)));
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Find math elements in a paragraph using both type and localName matching.
+    /// </summary>
+    private static List<OpenXmlElement> FindMathElements(Paragraph para)
+    {
+        return para.ChildElements
+            .Where(e => e.LocalName == "oMath" || e is M.OfficeMath)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Get all body-level elements, flattening SdtContent containers.
+    /// This ensures paragraphs and tables inside w:sdt are not missed.
+    /// </summary>
+    private static IEnumerable<OpenXmlElement> GetBodyElements(Body body)
+    {
+        foreach (var element in body.ChildElements)
+        {
+            if (element is SdtBlock sdt)
+            {
+                var content = sdt.SdtContentBlock;
+                if (content != null)
+                {
+                    foreach (var child in content.ChildElements)
+                        yield return child;
+                }
+            }
+            else
+            {
+                yield return element;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Checks if an element is a structural document element worth displaying
+    /// (not inline markers like bookmarkStart, bookmarkEnd, proofErr, etc.)
+    /// </summary>
+    private static bool IsStructuralElement(OpenXmlElement element)
+    {
+        var name = element.LocalName;
+        return name == "sectPr" || name == "altChunk" || name == "customXml";
+    }
+
+    /// <summary>
+    /// Get all Run elements in a paragraph, including those nested inside
+    /// Hyperlink and SdtContent containers.
+    /// </summary>
+    private static List<Run> GetAllRuns(Paragraph para)
+    {
+        return para.Descendants<Run>().ToList();
+    }
+
+    private static string GetRunText(Run run)
+    {
+        return string.Concat(run.Elements<Text>().Select(t => t.Text));
+    }
+
+    private string GetStyleName(Paragraph para)
+    {
+        var styleId = para.ParagraphProperties?.ParagraphStyleId?.Val?.Value;
+        if (styleId == null) return "Normal";
+
+        // Try to resolve display name from styles part
+        var stylesPart = _doc.MainDocumentPart?.StyleDefinitionsPart;
+        if (stylesPart?.Styles != null)
+        {
+            var style = stylesPart.Styles.Elements<Style>()
+                .FirstOrDefault(s => s.StyleId?.Value == styleId);
+            if (style?.StyleName?.Val?.Value != null)
+                return style.StyleName.Val.Value;
+        }
+
+        return styleId;
+    }
+
+    private static string? GetRunFont(Run run)
+    {
+        var fonts = run.RunProperties?.RunFonts;
+        return fonts?.EastAsia?.Value ?? fonts?.Ascii?.Value ?? fonts?.HighAnsi?.Value;
+    }
+
+    private static string? GetRunFontSize(Run run)
+    {
+        var size = run.RunProperties?.FontSize?.Val?.Value;
+        if (size == null) return null;
+        return $"{int.Parse(size) / 2}pt"; // stored as half-points
+    }
+
+    private string GetRunFormatDescription(Run run, Paragraph? para = null)
+    {
+        var parts = new List<string>();
+
+        RunProperties? rProps;
+        if (para != null)
+        {
+            rProps = ResolveEffectiveRunProperties(run, para);
+        }
+        else
+        {
+            rProps = run.RunProperties;
+        }
+        if (rProps == null) return "(default)";
+
+        var font = GetFontFromProperties(rProps);
+        if (font != null) parts.Add(font);
+
+        var size = GetSizeFromProperties(rProps);
+        if (size != null) parts.Add(size);
+
+        if (rProps.Bold != null) parts.Add("bold");
+        if (rProps.Italic != null) parts.Add("italic");
+        if (rProps.Underline != null) parts.Add("underline");
+        if (rProps.Strike != null) parts.Add("strikethrough");
+
+        return parts.Count > 0 ? string.Join(" ", parts) : "(default)";
+    }
+
+    private static int GetHeadingLevel(string styleName)
+    {
+        // Heading 1, Heading 2, heading1, 标题 1, etc.
+        foreach (var ch in styleName)
+        {
+            if (char.IsDigit(ch))
+                return ch - '0';
+        }
+        if (styleName == "Title") return 0;
+        if (styleName == "Subtitle") return 1;
+        return 1;
+    }
+
+    private static bool IsNormalStyle(string styleName)
+    {
+        return styleName is "Normal" or "正文" or "Body Text" or "Body" or "a"
+            || styleName.StartsWith("Normal");
+    }
+
+    private string? FindWatermark()
+    {
+        var headerParts = _doc.MainDocumentPart?.HeaderParts;
+        if (headerParts == null) return null;
+
+        foreach (var headerPart in headerParts)
+        {
+            var header = headerPart.Header;
+            if (header == null) continue;
+
+            // Search for VML shapes with watermark
+            foreach (var pict in header.Descendants<DocumentFormat.OpenXml.Wordprocessing.Picture>())
+            {
+                foreach (var shape in pict.Descendants<Vml.Shape>())
+                {
+                    var id = shape.GetAttribute("id", "");
+                    if (id.Value?.Contains("WaterMark", StringComparison.OrdinalIgnoreCase) == true)
+                    {
+                        var textPath = shape.Descendants<Vml.TextPath>().FirstOrDefault();
+                        return textPath?.String?.Value ?? "(image watermark)";
+                    }
+                }
+            }
+
+            // Also check for DrawingML watermarks
+            foreach (var drawing in header.Descendants<DocumentFormat.OpenXml.Wordprocessing.Drawing>())
+            {
+                // Simple detection: check if it looks like a watermark by inline/anchor properties
+                var docProps = drawing.Descendants<DocumentFormat.OpenXml.Drawing.Wordprocessing.DocProperties>().FirstOrDefault();
+                if (docProps?.Name?.Value?.Contains("WaterMark", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    return "(image watermark)";
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private List<string> GetHeaderTexts()
+    {
+        var results = new List<string>();
+        var headerParts = _doc.MainDocumentPart?.HeaderParts;
+        if (headerParts == null) return results;
+
+        foreach (var headerPart in headerParts)
+        {
+            var header = headerPart.Header;
+            if (header == null) continue;
+            var text = string.Concat(header.Descendants<Text>().Select(t => t.Text)).Trim();
+            if (!string.IsNullOrEmpty(text))
+                results.Add(text);
+        }
+
+        return results;
+    }
+
+    private List<string> GetFooterTexts()
+    {
+        var results = new List<string>();
+        var footerParts = _doc.MainDocumentPart?.FooterParts;
+        if (footerParts == null) return results;
+
+        foreach (var footerPart in footerParts)
+        {
+            var footer = footerPart.Footer;
+            if (footer == null) continue;
+            var text = string.Concat(footer.Descendants<Text>().Select(t => t.Text)).Trim();
+            if (!string.IsNullOrEmpty(text))
+                results.Add(text);
+            else
+            {
+                // Check for page numbers
+                var fldChars = footer.Descendants<FieldCode>().Any();
+                if (fldChars)
+                    results.Add("(page number)");
+            }
+        }
+
+        return results;
+    }
+
+    private static bool HasMixedPunctuation(string text)
+    {
+        var chinesePunct = "\uff0c\u3002\uff01\uff1f\u3001\uff1b\uff1a\u201c\u201d\u2018\u2019\uff08\uff09\u3010\u3011";
+        bool hasChinese = text.Any(c => chinesePunct.Contains(c));
+        bool hasEnglish = text.Any(c => ",.!?;:\"'()[]".Contains(c));
+        bool hasChineseChars = text.Any(c => c >= 0x4E00 && c <= 0x9FFF);
+        return hasChinese && hasEnglish && hasChineseChars;
+    }
+
+    private static RunProperties EnsureRunProperties(Run run)
+    {
+        return run.RunProperties ?? run.PrependChild(new RunProperties());
+    }
+}
