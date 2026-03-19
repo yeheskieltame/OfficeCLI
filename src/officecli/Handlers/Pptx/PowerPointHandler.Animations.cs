@@ -128,7 +128,7 @@ public partial class PowerPointHandler
             var p159Ns = "http://schemas.microsoft.com/office/powerpoint/2015/09/main";
 
             // Build speed/duration attributes
-            var spdAttr = speed.HasValue ? $" spd=\"{speed.Value.ToString().ToLowerInvariant()}\"" : "";
+            var spdAttr = speed.HasValue ? $" spd=\"{((IEnumValue)speed.Value).Value}\"" : "";
             var durAttr = durationMs != null ? $" dur=\"{durationMs}\"" : "";
 
             // mc:AlternateContent > mc:Choice[Requires=p159] > p:transition > p159:morph
@@ -139,7 +139,7 @@ public partial class PowerPointHandler
             var morphTrans = new OpenXmlUnknownElement("p", "transition", pNs);
             morphTrans.AddNamespaceDeclaration("p159", p159Ns);
             if (speed.HasValue)
-                morphTrans.SetAttribute(new OpenXmlAttribute("", "spd", null!, speed.Value.ToString().ToLowerInvariant()));
+                morphTrans.SetAttribute(new OpenXmlAttribute("", "spd", null!, ((IEnumValue)speed.Value).Value));
             if (durationMs != null)
                 morphTrans.SetAttribute(new OpenXmlAttribute("", "dur", null!, durationMs));
             var morphElem = new OpenXmlUnknownElement("p159", "morph", p159Ns);
@@ -151,7 +151,7 @@ public partial class PowerPointHandler
             var fallbackElement = new OpenXmlUnknownElement("mc", "Fallback", mcNs);
             var fallbackTrans = new OpenXmlUnknownElement("p", "transition", pNs);
             if (speed.HasValue)
-                fallbackTrans.SetAttribute(new OpenXmlAttribute("", "spd", null!, speed.Value.ToString().ToLowerInvariant()));
+                fallbackTrans.SetAttribute(new OpenXmlAttribute("", "spd", null!, ((IEnumValue)speed.Value).Value));
             fallbackTrans.AppendChild(new OpenXmlUnknownElement("p", "fade", pNs));
             fallbackElement.AppendChild(fallbackTrans);
 

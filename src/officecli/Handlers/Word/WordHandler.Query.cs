@@ -414,7 +414,7 @@ public partial class WordHandler
                 foreach (var href in sectPr.Elements<HeaderReference>())
                     if (href.Id?.Value == relId && href.Type?.Value != null)
                     {
-                        node.Format["type"] = href.Type.Value.ToString().ToLowerInvariant();
+                        node.Format["type"] = href.Type.InnerText;
                         break;
                     }
         }
@@ -433,8 +433,8 @@ public partial class WordHandler
         }
 
         var firstPara = header.Elements<Paragraph>().FirstOrDefault();
-        if (firstPara?.ParagraphProperties?.Justification?.Val?.Value != null)
-            node.Format["alignment"] = firstPara.ParagraphProperties.Justification.Val.Value.ToString().ToLowerInvariant();
+        if (firstPara?.ParagraphProperties?.Justification?.Val != null)
+            node.Format["alignment"] = firstPara.ParagraphProperties.Justification.Val.InnerText;
 
         node.ChildCount = header.Elements<Paragraph>().Count();
         if (depth > 0)
@@ -469,7 +469,7 @@ public partial class WordHandler
                 foreach (var fref in sectPr.Elements<FooterReference>())
                     if (fref.Id?.Value == relId && fref.Type?.Value != null)
                     {
-                        node.Format["type"] = fref.Type.Value.ToString().ToLowerInvariant();
+                        node.Format["type"] = fref.Type.InnerText;
                         break;
                     }
         }
@@ -488,8 +488,8 @@ public partial class WordHandler
         }
 
         var firstPara = footer.Elements<Paragraph>().FirstOrDefault();
-        if (firstPara?.ParagraphProperties?.Justification?.Val?.Value != null)
-            node.Format["alignment"] = firstPara.ParagraphProperties.Justification.Val.Value.ToString().ToLowerInvariant();
+        if (firstPara?.ParagraphProperties?.Justification?.Val != null)
+            node.Format["alignment"] = firstPara.ParagraphProperties.Justification.Val.InnerText;
 
         node.ChildCount = footer.Elements<Paragraph>().Count();
         if (depth > 0)

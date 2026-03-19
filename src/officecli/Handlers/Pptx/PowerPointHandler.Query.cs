@@ -271,13 +271,13 @@ public partial class PowerPointHandler
 
             // Vertical alignment
             if (tcPr?.Anchor?.HasValue == true)
-                cellNode.Format["valign"] = tcPr.Anchor.Value.ToString().ToLowerInvariant();
+                cellNode.Format["valign"] = tcPr.Anchor.InnerText;
 
             // Alignment from first paragraph
             var cellFirstPara = cell.TextBody?.Elements<Drawing.Paragraph>().FirstOrDefault();
             var cellParaAlign = cellFirstPara?.ParagraphProperties?.Alignment;
             if (cellParaAlign?.HasValue == true)
-                cellNode.Format["alignment"] = cellParaAlign.Value.ToString().ToLowerInvariant();
+                cellNode.Format["alignment"] = cellParaAlign.InnerText;
 
             // Font info from first run
             var firstRun = cell.Descendants<Drawing.Run>().FirstOrDefault();
@@ -540,7 +540,9 @@ public partial class PowerPointHandler
                 }
                 else if (MatchesShapeSelector(shape, parsed))
                 {
-                    results.Add(ShapeToNode(shape, slideNum, shapeIdx + 1, 0, slidePart));
+                    var node = ShapeToNode(shape, slideNum, shapeIdx + 1, 0, slidePart);
+                    if (MatchesGenericAttributes(node, parsed.Attributes))
+                        results.Add(node);
                 }
                 shapeIdx++;
             }
@@ -561,7 +563,9 @@ public partial class PowerPointHandler
 
                     if (MatchesPictureSelector(pic, parsed))
                     {
-                        results.Add(PictureToNode(pic, slideNum, picIdx + 1, slidePart));
+                        var picNode = PictureToNode(pic, slideNum, picIdx + 1, slidePart);
+                        if (MatchesGenericAttributes(picNode, parsed.Attributes))
+                            results.Add(picNode);
                     }
                     picIdx++;
                 }

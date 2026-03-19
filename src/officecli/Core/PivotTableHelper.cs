@@ -443,7 +443,7 @@ internal static class PivotTableHelper
             {
                 var df = dfList[i];
                 var dfName = df.Name?.Value ?? "";
-                var dfFunc = df.Subtotal?.Value.ToString().ToLowerInvariant() ?? "sum";
+                var dfFunc = df.Subtotal?.InnerText ?? "sum";
                 var dfField = df.Field?.Value ?? 0;
                 node.Format[$"dataField{i + 1}"] = $"{dfName}:{dfFunc}:{dfField}";
             }

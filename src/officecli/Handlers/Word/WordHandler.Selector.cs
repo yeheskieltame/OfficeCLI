@@ -123,8 +123,8 @@ public partial class WordHandler
             string? actual = key.ToLowerInvariant() switch
             {
                 "style" => GetStyleName(para),
-                "alignment" => para.ParagraphProperties?.Justification?.Val?.HasValue == true
-                    ? para.ParagraphProperties.Justification.Val.Value.ToString() : null,
+                "alignment" => para.ParagraphProperties?.Justification?.Val != null
+                    ? para.ParagraphProperties.Justification.Val.InnerText : null,
                 "firstlineindent" => para.ParagraphProperties?.Indentation?.FirstLine?.Value,
                 "numid" => para.ParagraphProperties?.NumberingProperties?.NumberingId?.Val?.HasValue == true
                     ? para.ParagraphProperties.NumberingProperties.NumberingId.Val.Value.ToString() : null,
@@ -191,7 +191,7 @@ public partial class WordHandler
         if (bracketIdx >= 0)
             int.TryParse(partPath[(bracketIdx + 1)..^0].TrimEnd(']'), out idx);
 
-        var headerPart = _doc.MainDocumentPart?.HeaderParts.ElementAtOrDefault(idx);
+        var headerPart = _doc.MainDocumentPart?.HeaderParts.ElementAtOrDefault(idx - 1);
         return headerPart?.Header?.OuterXml ?? $"(header[{idx}] not found)";
     }
 
@@ -202,7 +202,7 @@ public partial class WordHandler
         if (bracketIdx >= 0)
             int.TryParse(partPath[(bracketIdx + 1)..^0].TrimEnd(']'), out idx);
 
-        var footerPart = _doc.MainDocumentPart?.FooterParts.ElementAtOrDefault(idx);
+        var footerPart = _doc.MainDocumentPart?.FooterParts.ElementAtOrDefault(idx - 1);
         return footerPart?.Footer?.OuterXml ?? $"(footer[{idx}] not found)";
     }
 
@@ -213,7 +213,7 @@ public partial class WordHandler
         if (bracketIdx >= 0)
             int.TryParse(partPath[(bracketIdx + 1)..^0].TrimEnd(']'), out idx);
 
-        var chartPart = _doc.MainDocumentPart?.ChartParts.ElementAtOrDefault(idx);
+        var chartPart = _doc.MainDocumentPart?.ChartParts.ElementAtOrDefault(idx - 1);
         return chartPart?.ChartSpace?.OuterXml ?? $"(chart[{idx}] not found)";
     }
 }

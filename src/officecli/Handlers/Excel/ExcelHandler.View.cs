@@ -94,7 +94,7 @@ public partial class ExcelHandler
                     var cellRef = cell.CellReference?.Value ?? "?";
                     var value = GetCellDisplayValue(cell);
                     var formula = cell.CellFormula?.Text;
-                    var type = cell.DataType?.Value.ToString() ?? "Number";
+                    var type = cell.DataType?.InnerText ?? "Number";
 
                     var annotation = formula != null ? $"={formula}" : type;
                     var warn = "";
@@ -174,7 +174,7 @@ public partial class ExcelHandler
                     if (cell.CellFormula != null) formulaCells++;
                     if (value is "#REF!" or "#VALUE!" or "#NAME?" or "#DIV/0!") errorCells++;
 
-                    var type = cell.DataType?.Value.ToString() ?? "Number";
+                    var type = cell.DataType?.InnerText ?? "Number";
                     typeCounts[type] = typeCounts.GetValueOrDefault(type) + 1;
                 }
             }

@@ -116,7 +116,7 @@ public partial class ExcelHandler
         // Type filter
         if (selector.TypeEquals != null)
         {
-            var type = cell.DataType?.Value.ToString() ?? "Number";
+            var type = cell.DataType?.InnerText ?? "Number";
             if (!type.Equals(selector.TypeEquals, StringComparison.OrdinalIgnoreCase))
                 return false;
         }
