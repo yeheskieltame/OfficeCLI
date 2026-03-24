@@ -404,7 +404,7 @@ static class CommandBuilder
                 req.Command = "set";
                 req.Args["path"] = path;
                 req.Props = props;
-            }, json)) { WatchNotifier.NotifyIfWatching(file.FullName, path); return; }
+            }, json)) { return; }
 
             var properties = new Dictionary<string, string>();
             foreach (var prop in props ?? Array.Empty<string>())
@@ -449,7 +449,7 @@ static class CommandBuilder
                 if (unsupported.Count > 0)
                     Console.Error.WriteLine(FormatUnsupported(unsupported));
             }
-            WatchNotifier.NotifyIfWatching(file.FullName, path);
+            NotifyWatch(handler, file.FullName, path);
         }, json); });
 
         rootCommand.Add(setCommand);
@@ -499,14 +499,16 @@ static class CommandBuilder
                     req.Args["parent"] = parentPath;
                     req.Args["from"] = from;
                     if (index.HasValue) req.Args["index"] = index.Value.ToString();
-                }, json)) { WatchNotifier.NotifyIfWatching(file.FullName, parentPath); return; }
+                }, json)) { return; }
 
                 using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
+                var oldCount = (handler as OfficeCli.Handlers.PowerPointHandler)?.GetSlideCount() ?? 0;
                 var resultPath = handler.CopyFrom(from, parentPath, index);
                 var message = $"Copied to {resultPath}";
                 if (json) Console.WriteLine(OutputFormatter.WrapEnvelopeText(message));
                 else Console.WriteLine(message);
-                WatchNotifier.NotifyIfWatching(file.FullName, parentPath);
+                if (parentPath == "/") NotifyWatchRoot(handler, file.FullName, oldCount);
+                else NotifyWatch(handler, file.FullName, parentPath);
             }
             else
             {
@@ -517,7 +519,7 @@ static class CommandBuilder
                     req.Args["type"] = type!;
                     if (index.HasValue) req.Args["index"] = index.Value.ToString();
                     req.Props = props;
-                }, json)) { WatchNotifier.NotifyIfWatching(file.FullName, parentPath); return; }
+                }, json)) { return; }
 
                 var properties = new Dictionary<string, string>();
                 foreach (var prop in props ?? Array.Empty<string>())
@@ -530,11 +532,13 @@ static class CommandBuilder
                 }
 
                 using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
+                var oldCount = (handler as OfficeCli.Handlers.PowerPointHandler)?.GetSlideCount() ?? 0;
                 var resultPath = handler.Add(parentPath, type!, index, properties);
                 var message = $"Added {type} at {resultPath}";
                 if (json) Console.WriteLine(OutputFormatter.WrapEnvelopeText(message));
                 else Console.WriteLine(message);
-                WatchNotifier.NotifyIfWatching(file.FullName, parentPath);
+                if (parentPath == "/") NotifyWatchRoot(handler, file.FullName, oldCount);
+                else NotifyWatch(handler, file.FullName, parentPath);
             }
         }, json); });
 
@@ -558,15 +562,20 @@ static class CommandBuilder
             {
                 req.Command = "remove";
                 req.Args["path"] = path;
-            }, json)) { WatchNotifier.NotifyIfWatching(file.FullName, path); return; }
+            }, json)) { return; }
 
             using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
+            var oldCount = (handler as OfficeCli.Handlers.PowerPointHandler)?.GetSlideCount() ?? 0;
             var warning = handler.Remove(path);
             var message = $"Removed {path}";
             if (warning != null) message += $"\n{warning}";
             if (json) Console.WriteLine(OutputFormatter.WrapEnvelopeText(message));
             else Console.WriteLine(message);
-            WatchNotifier.NotifyIfWatching(file.FullName, path);
+            var slideNum = WatchMessage.ExtractSlideNum(path);
+            if (slideNum > 0 && !path.Contains("/shape["))
+                NotifyWatchRoot(handler, file.FullName, oldCount);
+            else
+                NotifyWatch(handler, file.FullName, path);
         }, json); });
 
         rootCommand.Add(removeCommand);
@@ -597,14 +606,14 @@ static class CommandBuilder
                 req.Args["path"] = path;
                 if (to != null) req.Args["to"] = to;
                 if (index.HasValue) req.Args["index"] = index.Value.ToString();
-            }, json)) { WatchNotifier.NotifyIfWatching(file.FullName, path); return; }
+            }, json)) { return; }
 
             using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
             var resultPath = handler.Move(path, to, index);
             var message = $"Moved to {resultPath}";
             if (json) Console.WriteLine(OutputFormatter.WrapEnvelopeText(message));
             else Console.WriteLine(message);
-            WatchNotifier.NotifyIfWatching(file.FullName, path);
+            NotifyWatch(handler, file.FullName, path);
         }, json); });
 
         rootCommand.Add(moveCommand);
@@ -684,7 +693,7 @@ static class CommandBuilder
                 req.Args["xpath"] = xpath;
                 req.Args["action"] = action;
                 if (xml != null) req.Args["xml"] = xml;
-            }, json)) { WatchNotifier.NotifyIfWatching(file.FullName, partPath); return; }
+            }, json)) { return; }
 
             using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
             var errorsBefore = handler.Validate().Select(e => e.Description).ToHashSet();
@@ -697,7 +706,7 @@ static class CommandBuilder
                 Console.WriteLine(message);
                 ReportNewErrors(handler, errorsBefore, warnings);
             }
-            WatchNotifier.NotifyIfWatching(file.FullName, partPath);
+            NotifyWatch(handler, file.FullName, null);
         }, json); });
 
         rootCommand.Add(rawSetCommand);
@@ -723,7 +732,7 @@ static class CommandBuilder
                 req.Command = "add-part";
                 req.Args["parent"] = parent;
                 req.Args["type"] = type;
-            }, json)) { WatchNotifier.NotifyIfWatching(file, parent); return; }
+            }, json)) { return; }
 
             using var handler = DocumentHandlerFactory.Open(file, editable: true);
             var errorsBefore = handler.Validate().Select(e => e.Description).ToHashSet();
@@ -736,7 +745,7 @@ static class CommandBuilder
                 Console.WriteLine(message);
                 ReportNewErrors(handler, errorsBefore, warnings);
             }
-            WatchNotifier.NotifyIfWatching(file, parent);
+            NotifyWatch(handler, file, null);
         }, json); });
 
         rootCommand.Add(addPartCommand);
@@ -863,7 +872,7 @@ static class CommandBuilder
             }
             PrintBatchResults(batchResults, json);
             if (batchResults.Any(r => r.Success))
-                WatchNotifier.NotifyIfWatching(file.FullName);
+                NotifyWatch(handler, file.FullName, null);
             if (batchResults.Any(r => !r.Success))
                 throw new InvalidOperationException($"Batch completed with {batchResults.Count(r => !r.Success)} error(s)");
         }, json); });
@@ -1264,6 +1273,47 @@ static class CommandBuilder
         }
 
         return d[s.Length, t.Length];
+    }
+
+    /// <summary>
+    /// Notify watch server with pre-rendered HTML from the handler.
+    /// Call this while the handler is still open (before Dispose).
+    /// </summary>
+    private static void NotifyWatch(IDocumentHandler handler, string filePath, string? changedPath)
+    {
+        if (handler is not OfficeCli.Handlers.PowerPointHandler ppt) return;
+        var slideNum = WatchMessage.ExtractSlideNum(changedPath);
+        if (slideNum > 0)
+        {
+            var html = ppt.RenderSlideHtml(slideNum);
+            if (html != null)
+            {
+                WatchNotifier.NotifyIfWatching(filePath, new WatchMessage { Action = "replace", Slide = slideNum, Html = html });
+                return;
+            }
+        }
+        WatchNotifier.NotifyIfWatching(filePath, new WatchMessage { Action = "full" });
+    }
+
+    private static void NotifyWatchRoot(IDocumentHandler handler, string filePath, int oldSlideCount)
+    {
+        if (handler is not OfficeCli.Handlers.PowerPointHandler ppt) return;
+        var newCount = ppt.GetSlideCount();
+        if (newCount > oldSlideCount)
+        {
+            var html = ppt.RenderSlideHtml(newCount);
+            if (html != null)
+            {
+                WatchNotifier.NotifyIfWatching(filePath, new WatchMessage { Action = "add", Slide = newCount, Html = html, FullHtml = ppt.ViewAsHtml() });
+                return;
+            }
+        }
+        else if (newCount < oldSlideCount)
+        {
+            WatchNotifier.NotifyIfWatching(filePath, new WatchMessage { Action = "remove", Slide = oldSlideCount, FullHtml = ppt.ViewAsHtml() });
+            return;
+        }
+        WatchNotifier.NotifyIfWatching(filePath, new WatchMessage { Action = "full", FullHtml = ppt.ViewAsHtml() });
     }
 
     /// <summary>

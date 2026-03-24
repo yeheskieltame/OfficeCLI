@@ -288,30 +288,44 @@ public class ResidentServer : IDisposable
                 break;
             case "set":
                 ExecuteSet(request);
-                WatchNotifier.NotifyIfWatching(_filePath, request.GetArg("path"));
+                NotifyWatchSlideChanged(request.GetArg("path"));
                 break;
             case "add":
+            {
+                var oldCount = GetPptSlideCount();
                 ExecuteAdd(request);
-                WatchNotifier.NotifyIfWatching(_filePath, request.GetArg("parent"));
+                var parent = request.GetArg("parent");
+                if (parent == "/")
+                    NotifyWatchRootChanged(oldCount);
+                else
+                    NotifyWatchSlideChanged(parent);
                 break;
+            }
             case "remove":
+            {
+                var oldCount = GetPptSlideCount();
+                var path = request.GetArg("path");
                 ExecuteRemove(request);
-                WatchNotifier.NotifyIfWatching(_filePath, request.GetArg("path"));
+                if (WatchMessage.ExtractSlideNum(path) > 0 && path != null && !path.Contains("/shape["))
+                    NotifyWatchRootChanged(oldCount);
+                else
+                    NotifyWatchSlideChanged(path);
                 break;
+            }
             case "move":
                 ExecuteMove(request);
-                WatchNotifier.NotifyIfWatching(_filePath, request.GetArg("path"));
+                NotifyWatchSlideChanged(request.GetArg("path"));
                 break;
             case "raw":
                 ExecuteRaw(request);
                 break;
             case "raw-set":
                 ExecuteRawSet(request);
-                WatchNotifier.NotifyIfWatching(_filePath);
+                NotifyWatchFullRefresh();
                 break;
             case "add-part":
                 ExecuteAddPart(request);
-                WatchNotifier.NotifyIfWatching(_filePath);
+                NotifyWatchFullRefresh();
                 break;
             case "validate":
                 ExecuteValidate();
@@ -320,6 +334,58 @@ public class ResidentServer : IDisposable
                 Console.Error.WriteLine($"Unknown command: {request.Command}");
                 break;
         }
+    }
+
+    // ==================== Watch notification helpers ====================
+
+    private int GetPptSlideCount()
+    {
+        if (_handler is OfficeCli.Handlers.PowerPointHandler ppt)
+            return ppt.GetSlideCount();
+        return 0;
+    }
+
+    private void NotifyWatchSlideChanged(string? changedPath)
+    {
+        if (_handler is not OfficeCli.Handlers.PowerPointHandler ppt) return;
+        var slideNum = WatchMessage.ExtractSlideNum(changedPath);
+        if (slideNum > 0)
+        {
+            var html = ppt.RenderSlideHtml(slideNum);
+            if (html != null)
+            {
+                WatchNotifier.NotifyIfWatching(_filePath, new WatchMessage { Action = "replace", Slide = slideNum, Html = html });
+                return;
+            }
+        }
+        WatchNotifier.NotifyIfWatching(_filePath, new WatchMessage { Action = "full" });
+    }
+
+    private void NotifyWatchRootChanged(int oldSlideCount)
+    {
+        if (_handler is not OfficeCli.Handlers.PowerPointHandler ppt) return;
+        var newCount = ppt.GetSlideCount();
+        if (newCount > oldSlideCount)
+        {
+            var html = ppt.RenderSlideHtml(newCount);
+            if (html != null)
+            {
+                WatchNotifier.NotifyIfWatching(_filePath, new WatchMessage { Action = "add", Slide = newCount, Html = html, FullHtml = ppt.ViewAsHtml() });
+                return;
+            }
+        }
+        else if (newCount < oldSlideCount)
+        {
+            WatchNotifier.NotifyIfWatching(_filePath, new WatchMessage { Action = "remove", Slide = oldSlideCount, FullHtml = ppt.ViewAsHtml() });
+            return;
+        }
+        WatchNotifier.NotifyIfWatching(_filePath, new WatchMessage { Action = "full", FullHtml = ppt.ViewAsHtml() });
+    }
+
+    private void NotifyWatchFullRefresh()
+    {
+        if (_handler is not OfficeCli.Handlers.PowerPointHandler ppt) return;
+        WatchNotifier.NotifyIfWatching(_filePath, new WatchMessage { Action = "full", FullHtml = ppt.ViewAsHtml() });
     }
 
     private void ExecuteView(ResidentRequest req, OutputFormat format)

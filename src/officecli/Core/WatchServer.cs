@@ -4,10 +4,15 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Text.RegularExpressions;
+using System.Text.Json;
 
 namespace OfficeCli.Core;
 
+/// <summary>
+/// Pure SSE relay server. Never opens the document file.
+/// Receives pre-rendered HTML from command processes via named pipe,
+/// forwards to browsers via SSE.
+/// </summary>
 public class WatchServer : IDisposable
 {
     private readonly string _filePath;
@@ -21,6 +26,13 @@ public class WatchServer : IDisposable
     private bool _disposed;
     private DateTime _lastActivityTime = DateTime.UtcNow;
     private readonly TimeSpan _idleTimeout;
+
+    private const string WaitingHtml = """
+        <html><head><meta charset="utf-8"><title>Watching...</title>
+        <style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f5;color:#666;}
+        .msg{text-align:center;}</style></head>
+        <body><div class="msg"><h2>Waiting for first update...</h2><p>Run an officecli command to see the preview.</p></div></body></html>
+        """;
 
     private const string SseScript = """
         <script>
@@ -102,12 +114,46 @@ public class WatchServer : IDisposable
         return $"officecli-watch-{hash}";
     }
 
+    /// <summary>
+    /// Check if another watch process is already running for this file.
+    /// Returns the port number if running, or null if not.
+    /// </summary>
+    public static int? GetExistingWatchPort(string filePath)
+    {
+        try
+        {
+            int? result = null;
+            var task = Task.Run(() =>
+            {
+                var pipeName = GetWatchPipeName(filePath);
+                using var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut);
+                client.Connect(100);
+                using var writer = new StreamWriter(client, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
+                using var reader = new StreamReader(client, Encoding.UTF8, leaveOpen: true);
+                writer.WriteLine("ping");
+                var response = reader.ReadLine();
+                result = int.TryParse(response, out var port) ? port : 0;
+            });
+            return task.Wait(TimeSpan.FromSeconds(2)) ? result : null;
+        }
+        catch
+        {
+            return null; // not running
+        }
+    }
+
     public async Task RunAsync(CancellationToken externalToken = default)
     {
+        // Prevent duplicate watch processes for the same file
+        var existingPort = GetExistingWatchPort(_filePath);
+        if (existingPort.HasValue)
+        {
+            var url = existingPort.Value > 0 ? $" at http://localhost:{existingPort.Value}" : "";
+            throw new InvalidOperationException($"Another watch process is already running{url} for {_filePath}");
+        }
+
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, externalToken);
         var token = linkedCts.Token;
-
-        RefreshFullHtml();
 
         _tcpListener.Start();
         Console.WriteLine($"Watch: http://localhost:{_port}");
@@ -153,159 +199,6 @@ public class WatchServer : IDisposable
         }
     }
 
-    private void RefreshFullHtml()
-    {
-        try
-        {
-            var response = ResidentClient.TrySend(_filePath, new ResidentRequest
-            {
-                Command = "view",
-                Args = new Dictionary<string, string> { ["mode"] = "html" },
-                Json = true
-            });
-
-            if (response != null && response.ExitCode == 0 && !string.IsNullOrEmpty(response.Stdout))
-            {
-                _currentHtml = response.Stdout;
-                return;
-            }
-
-            using var handler = DocumentHandlerFactory.Open(_filePath);
-            if (handler is OfficeCli.Handlers.PowerPointHandler pptHandler)
-            {
-                _currentHtml = pptHandler.ViewAsHtml();
-            }
-            else
-            {
-                _currentHtml = "<html><body><p>HTML preview is only supported for .pptx files.</p></body></html>";
-            }
-        }
-        catch (Exception ex)
-        {
-            _currentHtml = $"<html><body><p>Error: {ex.Message}</p></body></html>";
-        }
-    }
-
-    /// <summary>
-    /// Extract slide number from a path like /slide[2]/shape[1] → 2.
-    /// Returns 0 if path is "/" (root-level add like adding a slide).
-    /// </summary>
-    private static int ExtractSlideNum(string? path)
-    {
-        if (string.IsNullOrEmpty(path)) return 0;
-        var match = Regex.Match(path, @"/slide\[(\d+)\]");
-        if (match.Success && int.TryParse(match.Groups[1].Value, out var num))
-            return num;
-        return 0; // root-level operation
-    }
-
-    /// <summary>
-    /// Render a single slide HTML using resident or direct file access.
-    /// </summary>
-    private string? RenderSlideHtml(int slideNum)
-    {
-        try
-        {
-            // Try resident: the handler stays in memory
-            var response = ResidentClient.TrySend(_filePath, new ResidentRequest
-            {
-                Command = "view",
-                Args = new Dictionary<string, string> { ["mode"] = "html" },
-                Json = true
-            });
-
-            if (response != null && response.ExitCode == 0 && !string.IsNullOrEmpty(response.Stdout))
-            {
-                // Resident returned full HTML; we need to update _currentHtml and extract the slide
-                _currentHtml = response.Stdout;
-            }
-            else
-            {
-                using var handler = DocumentHandlerFactory.Open(_filePath);
-                if (handler is OfficeCli.Handlers.PowerPointHandler pptHandler)
-                {
-                    var slideHtml = pptHandler.RenderSlideHtml(slideNum);
-                    if (slideHtml != null) return slideHtml;
-                    _currentHtml = pptHandler.ViewAsHtml();
-                }
-            }
-
-            // Extract slide fragment from full HTML
-            return ExtractSlideFragment(_currentHtml, slideNum);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static string? ExtractSlideFragment(string fullHtml, int slideNum)
-    {
-        var marker = $"data-slide=\"{slideNum}\"";
-        var idx = fullHtml.IndexOf(marker, StringComparison.Ordinal);
-        if (idx < 0) return null;
-
-        // Find the opening <div that contains this marker
-        var start = fullHtml.LastIndexOf("<div ", idx, StringComparison.Ordinal);
-        if (start < 0) return null;
-
-        // Find matching closing </div> by counting nesting
-        var depth = 0;
-        var pos = start;
-        while (pos < fullHtml.Length)
-        {
-            var nextOpen = fullHtml.IndexOf("<div", pos, StringComparison.OrdinalIgnoreCase);
-            var nextClose = fullHtml.IndexOf("</div>", pos, StringComparison.OrdinalIgnoreCase);
-
-            if (nextClose < 0) break;
-
-            if (nextOpen >= 0 && nextOpen < nextClose)
-            {
-                depth++;
-                pos = nextOpen + 4;
-            }
-            else
-            {
-                depth--;
-                if (depth == 0)
-                {
-                    return fullHtml[start..(nextClose + 6)];
-                }
-                pos = nextClose + 6;
-            }
-        }
-
-        return null;
-    }
-
-    private int GetSlideCount()
-    {
-        try
-        {
-            var response = ResidentClient.TrySend(_filePath, new ResidentRequest
-            {
-                Command = "view",
-                Args = new Dictionary<string, string> { ["mode"] = "html" },
-                Json = true
-            });
-
-            if (response != null && response.ExitCode == 0 && !string.IsNullOrEmpty(response.Stdout))
-            {
-                _currentHtml = response.Stdout;
-            }
-            else
-            {
-                using var handler = DocumentHandlerFactory.Open(_filePath);
-                if (handler is OfficeCli.Handlers.PowerPointHandler pptHandler)
-                    return pptHandler.GetSlideCount();
-            }
-        }
-        catch { }
-
-        // Count from cached HTML
-        return Regex.Matches(_currentHtml, @"data-slide=""\d+""").Count;
-    }
-
     private async Task RunPipeListenerAsync(CancellationToken token)
     {
         while (!token.IsCancellationRequested)
@@ -322,22 +215,25 @@ public class WatchServer : IDisposable
                 using var writer = new StreamWriter(server, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
 
                 var message = await reader.ReadLineAsync(token);
-                await writer.WriteLineAsync("ok".AsMemory(), token);
                 _lastActivityTime = DateTime.UtcNow;
 
                 if (message == "close")
                 {
+                    await writer.WriteLineAsync("ok".AsMemory(), token);
                     Console.WriteLine("Watch closed by remote command.");
                     _cts.Cancel();
                     break;
                 }
-                else if (message != null && message.StartsWith("refresh"))
+                else if (message == "ping")
                 {
-                    string? changedPath = null;
-                    if (message.Contains(':'))
-                        changedPath = message[(message.IndexOf(':') + 1)..];
-
-                    HandleChange(changedPath);
+                    // Return port so callers can find the existing watch URL
+                    await writer.WriteLineAsync(_port.ToString().AsMemory(), token);
+                }
+                else if (message != null)
+                {
+                    await writer.WriteLineAsync("ok".AsMemory(), token);
+                    // Try to parse as WatchMessage JSON
+                    HandleWatchMessage(message);
                 }
             }
             catch (OperationCanceledException) { break; }
@@ -349,60 +245,106 @@ public class WatchServer : IDisposable
         }
     }
 
-    private void HandleChange(string? changedPath)
+    private void HandleWatchMessage(string json)
     {
-        var slideNum = ExtractSlideNum(changedPath);
-
-        if (slideNum == 0)
+        try
         {
-            // Root-level change (add/remove slide) — need to figure out what happened
-            var oldCount = Regex.Matches(_currentHtml, @"data-slide=""\d+""").Count;
-            RefreshFullHtml();
-            var newCount = Regex.Matches(_currentHtml, @"data-slide=""\d+""").Count;
+            var msg = JsonSerializer.Deserialize(json, WatchMessageJsonContext.Default.WatchMessage);
+            if (msg == null) return;
 
-            if (newCount > oldCount)
+            // Update cached full HTML
+            if (!string.IsNullOrEmpty(msg.FullHtml))
             {
-                // Slide added — render the new slide and push "add"
-                var slideHtml = ExtractSlideFragment(_currentHtml, newCount);
-                if (slideHtml != null)
-                {
-                    SendSseEvent("add", newCount, slideHtml);
-                    return;
-                }
+                _currentHtml = msg.FullHtml;
             }
-            else if (newCount < oldCount)
+            else if (msg.Action == "replace" && msg.Slide > 0 && msg.Html != null)
             {
-                // Slide removed — figure out which one
-                // For simplicity, find which slide number is missing
-                for (int i = 1; i <= oldCount; i++)
-                {
-                    if (ExtractSlideFragment(_currentHtml, i) == null || i > newCount)
-                    {
-                        SendSseEvent("remove", i, null);
-                        return;
-                    }
-                }
+                // Patch _currentHtml in-place: replace the matching slide fragment
+                _currentHtml = PatchSlideInHtml(_currentHtml, msg.Slide, msg.Html);
+            }
+            else if (msg.Action == "add" && msg.Html != null)
+            {
+                // Append new slide before closing </div> of .main
+                _currentHtml = AppendSlideToHtml(_currentHtml, msg.Html);
+            }
+            else if (msg.Action == "remove" && msg.Slide > 0)
+            {
+                _currentHtml = RemoveSlideFromHtml(_currentHtml, msg.Slide);
             }
 
-            // Fallback: full reload
+            // Forward to SSE clients
+            SendSseEvent(msg.Action, msg.Slide, msg.Html);
+        }
+        catch
+        {
+            // Legacy format or parse error — treat as full refresh signal
             SendSseEvent("full", 0, null);
         }
-        else
+    }
+
+    /// <summary>Replace a single slide fragment in the full HTML by data-slide number.</summary>
+    private static string PatchSlideInHtml(string html, int slideNum, string newFragment)
+    {
+        var (start, end) = FindSlideFragmentRange(html, slideNum);
+        if (start < 0) return html;
+        return string.Concat(html.AsSpan(0, start), newFragment, html.AsSpan(end));
+    }
+
+    /// <summary>Append a slide fragment before the last closing tag of the main container.</summary>
+    private static string AppendSlideToHtml(string html, string fragment)
+    {
+        // Find the last </div> before </body> — that's the .main container's closing tag
+        var bodyClose = html.LastIndexOf("</body>", StringComparison.OrdinalIgnoreCase);
+        if (bodyClose < 0) return html + fragment;
+        // Find the </div> just before </body>
+        var mainClose = html.LastIndexOf("</div>", bodyClose, StringComparison.OrdinalIgnoreCase);
+        if (mainClose < 0) return html;
+        return string.Concat(html.AsSpan(0, mainClose), fragment, "\n", html.AsSpan(mainClose));
+    }
+
+    /// <summary>Remove a slide fragment from the full HTML.</summary>
+    private static string RemoveSlideFromHtml(string html, int slideNum)
+    {
+        var (start, end) = FindSlideFragmentRange(html, slideNum);
+        if (start < 0) return html;
+        return string.Concat(html.AsSpan(0, start), html.AsSpan(end));
+    }
+
+    /// <summary>Find the start/end character positions of a slide-container div in the HTML.</summary>
+    private static (int Start, int End) FindSlideFragmentRange(string html, int slideNum)
+    {
+        var marker = $"data-slide=\"{slideNum}\"";
+        var idx = html.IndexOf(marker, StringComparison.Ordinal);
+        if (idx < 0) return (-1, -1);
+
+        var start = html.LastIndexOf("<div ", idx, StringComparison.Ordinal);
+        if (start < 0) return (-1, -1);
+
+        // Find matching closing </div> by counting nesting
+        var depth = 0;
+        var pos = start;
+        while (pos < html.Length)
         {
-            // Slide-level change — render just that slide
-            var slideHtml = RenderSlideHtml(slideNum);
-            if (slideHtml != null)
+            var nextOpen = html.IndexOf("<div", pos, StringComparison.OrdinalIgnoreCase);
+            var nextClose = html.IndexOf("</div>", pos, StringComparison.OrdinalIgnoreCase);
+
+            if (nextClose < 0) break;
+
+            if (nextOpen >= 0 && nextOpen < nextClose)
             {
-                SendSseEvent("replace", slideNum, slideHtml);
-                // Also update _currentHtml so new page loads show latest state
-                RefreshFullHtml();
+                depth++;
+                pos = nextOpen + 4;
             }
             else
             {
-                RefreshFullHtml();
-                SendSseEvent("full", 0, null);
+                depth--;
+                if (depth == 0)
+                    return (start, nextClose + 6);
+                pos = nextClose + 6;
             }
         }
+
+        return (-1, -1);
     }
 
     private void SendSseEvent(string action, int slideNum, string? html)
@@ -436,7 +378,7 @@ public class WatchServer : IDisposable
         }
         sb.Append('}');
 
-        var json = sb.ToString();
+        var sseJson = sb.ToString();
 
         lock (_sseLock)
         {
@@ -445,7 +387,7 @@ public class WatchServer : IDisposable
             {
                 try
                 {
-                    var data = Encoding.UTF8.GetBytes($"event: update\ndata: {json}\n\n");
+                    var data = Encoding.UTF8.GetBytes($"event: update\ndata: {sseJson}\n\n");
                     client.Write(data);
                     client.Flush();
                 }
@@ -471,7 +413,9 @@ public class WatchServer : IDisposable
             }
             else
             {
-                var html = InjectSseScript(_currentHtml);
+                var html = string.IsNullOrEmpty(_currentHtml)
+                    ? InjectSseScript(WaitingHtml)
+                    : InjectSseScript(_currentHtml);
                 var body = Encoding.UTF8.GetBytes(html);
                 var header = Encoding.UTF8.GetBytes(
                     $"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n");
