@@ -282,17 +282,25 @@ public partial class WordHandler
 
         if (spacing != null)
         {
-            // Before: try direct, then style fallback
+            // Before: try direct, then style fallback (before in twips, beforeLines in hundredths of a line)
             var beforeVal = pProps.SpacingBetweenLines?.Before?.Value
                             ?? styleSpacing?.Before?.Value;
+            var beforeLinesVal = pProps.SpacingBetweenLines?.BeforeLines?.Value
+                                 ?? styleSpacing?.BeforeLines?.Value;
             if (beforeVal is string beforeTwips && beforeTwips != "0")
                 parts.Add($"margin-top:{TwipsToPx(beforeTwips):0.#}px");
+            else if (beforeLinesVal is int beforeLines && beforeLines != 0)
+                parts.Add($"margin-top:{beforeLines / 100.0:0.##}em");
 
-            // After: try direct, then style fallback
+            // After: try direct, then style fallback (after in twips, afterLines in hundredths of a line)
             var afterVal = pProps.SpacingBetweenLines?.After?.Value
                            ?? styleSpacing?.After?.Value;
+            var afterLinesVal = pProps.SpacingBetweenLines?.AfterLines?.Value
+                                ?? styleSpacing?.AfterLines?.Value;
             if (afterVal is string afterTwips && afterTwips != "0")
                 parts.Add($"margin-bottom:{TwipsToPx(afterTwips):0.#}px");
+            else if (afterLinesVal is int afterLines && afterLines != 0)
+                parts.Add($"margin-bottom:{afterLines / 100.0:0.##}em");
 
             // Line: try direct, then style fallback
             var lineVal = pProps.SpacingBetweenLines?.Line?.Value
@@ -450,10 +458,20 @@ public partial class WordHandler
                 var spacing = pPr.SpacingBetweenLines;
                 if (spacing != null)
                 {
-                    if (spacing.Before?.Value is string b && b != "0" && !parts.Any(p => p.StartsWith("margin-top")))
-                        parts.Add($"margin-top:{TwipsToPx(b):0.#}px");
-                    if (spacing.After?.Value is string a && a != "0" && !parts.Any(p => p.StartsWith("margin-bottom")))
-                        parts.Add($"margin-bottom:{TwipsToPx(a):0.#}px");
+                    if (!parts.Any(p => p.StartsWith("margin-top")))
+                    {
+                        if (spacing.Before?.Value is string b && b != "0")
+                            parts.Add($"margin-top:{TwipsToPx(b):0.#}px");
+                        else if (spacing.BeforeLines?.Value is int bl && bl != 0)
+                            parts.Add($"margin-top:{bl / 100.0:0.##}em");
+                    }
+                    if (!parts.Any(p => p.StartsWith("margin-bottom")))
+                    {
+                        if (spacing.After?.Value is string a && a != "0")
+                            parts.Add($"margin-bottom:{TwipsToPx(a):0.#}px");
+                        else if (spacing.AfterLines?.Value is int al && al != 0)
+                            parts.Add($"margin-bottom:{al / 100.0:0.##}em");
+                    }
                     if (spacing.Line?.Value is string lv && !parts.Any(p => p.StartsWith("line-height")))
                     {
                         var rule = spacing.LineRule?.InnerText;
@@ -732,6 +750,28 @@ public partial class WordHandler
     private static string CssSanitize(string value) =>
         Regex.Replace(value, @"[""'\\<>&;{}]", "");
 
+    private static string JsStringLiteral(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return "\"\"";
+        var sb = new StringBuilder("\"");
+        foreach (var c in text)
+        {
+            switch (c)
+            {
+                case '\\': sb.Append("\\\\"); break;
+                case '"': sb.Append("\\\""); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                case '<': sb.Append("\\x3c"); break;
+                case '>': sb.Append("\\x3e"); break;
+                default: sb.Append(c); break;
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
+
     private static string HtmlEncode(string? text)
     {
         if (string.IsNullOrEmpty(text)) return "";
@@ -751,16 +791,20 @@ public partial class WordHandler
 
     private static string GenerateWordCss(PageLayout pg, DocDef dd)
     {
-        var mL = $"{pg.MarginLeftCm:0.##}cm";
-        var mR = $"{pg.MarginRightCm:0.##}cm";
-        var mT = $"{pg.MarginTopCm:0.##}cm";
-        var mB = $"{pg.MarginBottomCm:0.##}cm";
-        var lr = $"{pg.MarginLeftCm:0.##}cm {pg.MarginRightCm:0.##}cm";
-        var font = $"\'{CssSanitize(dd.Font)}\', \'Microsoft YaHei\', \'Segoe UI\', -apple-system, \'PingFang SC\', sans-serif";
-        var pageH = $"{pg.HeightCm:0.##}cm";
+        // Use pt units (twips/20) for pixel-perfect accuracy — no cm→px conversion loss
+        var mL = $"{pg.MarginLeftPt:0.#}pt";
+        var mR = $"{pg.MarginRightPt:0.#}pt";
+        var mT = $"{pg.MarginTopPt:0.#}pt";
+        var mB = $"{pg.MarginBottomPt:0.#}pt";
+        // Build font fallback chain: document font → platform-specific CJK equivalents → generic
+        var docFont = CssSanitize(dd.Font);
+        var cjkFallback = GetCjkFontFallback(docFont);
+        var font = $"\'{docFont}\'{cjkFallback}, \'Microsoft YaHei\', -apple-system, \'PingFang SC\', sans-serif";
+        var pageH = $"{pg.HeightPt:0.#}pt";
+        var pageW = $"{pg.WidthPt:0.#}pt";
         var sz = $"{dd.SizePt:0.##}pt";
-        var lh = $"{dd.LineHeight:0.##}";
-        var tblW = $"calc(100% - {pg.MarginLeftCm + pg.MarginRightCm:0.##}cm)";
+        // Use docGrid linePitch as line-height when available (CJK snap-to-grid)
+        var lh = dd.GridLinePitchPt > 0 ? $"{dd.GridLinePitchPt:0.##}pt" : $"{dd.LineHeight:0.##}";
 
         return $@"
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -768,15 +812,16 @@ public partial class WordHandler
         .page {{ background: white; margin: 0 auto 40px; padding: {mT} {mR} {mB} {mL};
             box-shadow: 0 2px 8px rgba(0,0,0,0.15); border-radius: 4px;
             min-height: {pageH}; line-height: {lh}; font-size: {sz}; position: relative; overflow-x: auto;
-            display: flex; flex-direction: column; }}
+            display: flex; flex-direction: column; font-kerning: none; letter-spacing: 0;
+            }}
         .page-body {{ flex: 1; }}
         .doc-header, .doc-footer {{ color: #888; font-size: 9pt; }}
-        .doc-header {{ position: absolute; top: {pg.HeaderDistanceCm:0.##}cm; left: {mL}; right: {mR};
+        .doc-header {{ position: absolute; top: {pg.HeaderDistancePt:0.#}pt; left: {mL}; right: {mR};
             border-bottom: 1px solid #e0e0e0; padding-bottom: 0.3em; }}
-        .doc-footer {{ position: absolute; bottom: {pg.FooterDistanceCm:0.##}cm; left: {mL}; right: {mR};
+        .doc-footer {{ position: absolute; bottom: {pg.FooterDistancePt:0.#}pt; left: {mL}; right: {mR};
             border-top: 1px solid #e0e0e0; padding-top: 0.3em; }}
         h1, h2, h3, h4, h5, h6 {{ line-height: 1.4; }}
-        p {{ margin: 0; }}
+        p {{ margin: 0; text-align: justify; text-justify: inter-character; }}
         p.empty {{ margin: 0; min-height: 1em; }}
         a {{ color: #2B579A; }} a:hover {{ color: #1a3c6e; }}
         ul, ol {{ padding-left: 2em; margin: 0.2em 0; }}
@@ -795,5 +840,24 @@ public partial class WordHandler
         @media print {{ body {{ background: white; padding: 0; }}
             .page {{ box-shadow: none; margin: 0; max-width: none; }}
             hr.page-break {{ page-break-after: always; border: none; margin: 0; }} }}";
+    }
+
+    /// <summary>Get platform-specific CJK font fallback for the given document font.</summary>
+    private static string GetCjkFontFallback(string docFont)
+    {
+        var lower = docFont.ToLowerInvariant();
+        // Song/宋 → serif CJK fonts (macOS: Songti SC / STSong)
+        if (lower.Contains("宋") || lower.Contains("song") || lower == "simsun")
+            return ", 'Songti SC', 'STSong'";
+        // Hei/黑 → sans-serif CJK fonts (macOS: PingFang SC / STHeiti)
+        if (lower.Contains("黑") || lower.Contains("hei") || lower == "simhei")
+            return ", 'PingFang SC', 'STHeiti'";
+        // Kai/楷 → cursive CJK fonts (macOS: Kaiti SC / STKaiti)
+        if (lower.Contains("楷") || lower.Contains("kai"))
+            return ", 'Kaiti SC', 'STKaiti'";
+        // FangSong/仿宋 → (macOS: STFangsong)
+        if (lower.Contains("仿宋") || lower.Contains("fangsong"))
+            return ", 'STFangsong'";
+        return "";
     }
 }

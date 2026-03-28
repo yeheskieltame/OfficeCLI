@@ -22,6 +22,26 @@ public partial class WordHandler
         public List<int> EndnoteRefs { get; } = new();
         public PageLayout? CachedPageLayout { get; set; }
         public bool RenderingBody { get; set; }
+
+        // CJK line-break tracking: accumulate character widths and insert <br> at Word-compatible positions
+        public double LineWidthPt { get; set; }      // available width for current line
+        public double LineAccumPt { get; set; }       // accumulated width on current line
+        public bool LineBreakEnabled { get; set; }    // whether line-break tracking is active
+        public double DefaultFontSizePt { get; set; } // default font size for width estimation
+
+        public void ResetLineForParagraph(double contentWidthPt, double firstLineIndentPt, double defaultSizePt)
+        {
+            LineWidthPt = contentWidthPt - firstLineIndentPt;
+            LineAccumPt = 0;
+            LineBreakEnabled = true;
+            DefaultFontSizePt = defaultSizePt;
+        }
+
+        public void NewLine(double contentWidthPt)
+        {
+            LineWidthPt = contentWidthPt;
+            LineAccumPt = 0;
+        }
     }
 
     /// <summary>Current render context — set during ViewAsHtml, used by all render methods.</summary>
@@ -57,7 +77,7 @@ public partial class WordHandler
         sb.AppendLine("<body>");
 
         // Render body into temporary buffer, then split on page breaks
-        var maxW = $"max-width:{pgLayout.WidthCm:0.##}cm";
+        var maxW = $"max-width:{pgLayout.WidthPt:0.#}pt";
         var bodySb = new StringBuilder();
         _ctx.RenderingBody = true;
         RenderBodyHtml(bodySb, body);
@@ -117,7 +137,8 @@ public partial class WordHandler
         // Endnotes at document end (outside page divs)
         sb.Append(endnotesHtml);
 
-        // KaTeX auto-render script
+        // Auto-pagination script: split overflowing pages and KaTeX rendering
+        var bodyHeightPt = pgLayout.HeightPt - pgLayout.MarginTopPt - pgLayout.MarginBottomPt;
         sb.AppendLine("<script>");
         sb.AppendLine("document.addEventListener('DOMContentLoaded',function(){");
         sb.AppendLine("  if(typeof renderMathInElement!=='undefined'){");
@@ -125,6 +146,94 @@ public partial class WordHandler
         sb.AppendLine("      {left:'$$',right:'$$',display:true}");
         sb.AppendLine("    ],throwOnError:false});");
         sb.AppendLine("  }");
+        // CJK punctuation compression (~25% per JIS X4051): negative margin on punctuation
+        sb.AppendLine("  (function(){");
+        sb.AppendLine("  var re=/([\\u3000-\\u303F\\uFF01-\\uFF60\\uFE30-\\uFE4F\\u2014\\u2015\\u2026\\u2018\\u2019\\u201C\\u201D])/;");
+        sb.AppendLine("  document.querySelectorAll('.page-body').forEach(function(body){");
+        sb.AppendLine("    var w=document.createTreeWalker(body,NodeFilter.SHOW_TEXT);");
+        sb.AppendLine("    var nodes=[];while(w.nextNode())nodes.push(w.currentNode);");
+        sb.AppendLine("    nodes.forEach(function(nd){");
+        sb.AppendLine("      if(!re.test(nd.textContent))return;");
+        sb.AppendLine("      var parts=nd.textContent.split(re);");
+        sb.AppendLine("      if(parts.length<=1)return;");
+        sb.AppendLine("      var frag=document.createDocumentFragment();");
+        sb.AppendLine("      for(var i=0;i<parts.length;i++){");
+        sb.AppendLine("        if(!parts[i])continue;");
+        sb.AppendLine("        if(re.test(parts[i])){");
+        sb.AppendLine("          var sp=document.createElement('span');");
+        sb.AppendLine("          sp.textContent=parts[i];");
+        sb.AppendLine("          sp.style.marginRight='-0.2em';");
+        sb.AppendLine("          frag.appendChild(sp);");
+        sb.AppendLine("        }else frag.appendChild(document.createTextNode(parts[i]));");
+        sb.AppendLine("      }");
+        sb.AppendLine("      nd.parentNode.replaceChild(frag,nd);");
+        sb.AppendLine("    });");
+        sb.AppendLine("  });");
+        sb.AppendLine("  })();");
+        // Auto-pagination: measure content and split overflowing pages
+        sb.AppendLine($"  var maxBodyH={bodyHeightPt:0.#}*96/72;"); // pt to px (96dpi)
+        sb.AppendLine("  var ftpl=" + JsStringLiteral(footerTemplate) + ";");
+        sb.AppendLine(@"
+  function paginate(){
+    var pages=document.querySelectorAll('.page');
+    for(var pi=0;pi<pages.length;pi++){
+      var page=pages[pi];
+      var body=page.querySelector('.page-body');
+      if(!body)continue;
+      if(body.scrollHeight<=maxBodyH+2)continue;
+      // Find first child that overflows
+      var children=Array.from(body.children);
+      var splitIdx=-1;
+      for(var ci=0;ci<children.length;ci++){
+        var bot=children[ci].offsetTop+children[ci].offsetHeight-body.offsetTop;
+        if(bot>maxBodyH){splitIdx=ci;break;}
+      }
+      if(splitIdx<=0)continue;
+      // Create new page
+      var np=document.createElement('div');
+      np.className='page';
+      np.style.cssText=page.style.cssText;
+      var nb=document.createElement('div');
+      nb.className='page-body';
+      // Move overflow children to new page
+      while(splitIdx<children.length){
+        nb.appendChild(children[splitIdx]);
+        splitIdx++;
+      }
+      np.appendChild(nb);
+      // Clone footer into new page
+      var nf=document.createElement('div');
+      nf.innerHTML=ftpl;
+      if(nf.firstChild)np.appendChild(nf.firstChild);
+      page.after(np);
+    }
+    // Renumber pages
+    var allPages=document.querySelectorAll('.page');
+    var total=allPages.length;
+    allPages.forEach(function(p,i){
+      var nums=p.querySelectorAll('.page-num');
+      nums.forEach(function(n){n.textContent=(i+1);});
+      // Also handle PAGE_NUM placeholders in footer spans
+      var footer=p.querySelector('.doc-footer');
+      if(footer){
+        var spans=footer.querySelectorAll('span');
+        spans.forEach(function(s){
+          if(s.textContent.trim().match(/^\d+$/)){
+            s.textContent=(i+1);
+          }
+        });
+      }
+    });
+    // Recurse in case new pages also overflow
+    var again=false;
+    document.querySelectorAll('.page').forEach(function(p){
+      var b=p.querySelector('.page-body');
+      if(b&&b.scrollHeight>maxBodyH+2)again=true;
+    });
+    if(again)setTimeout(paginate,0);
+  }
+  setTimeout(paginate,100);
+");
         sb.AppendLine("});");
         sb.AppendLine("</script>");
 
@@ -137,7 +246,10 @@ public partial class WordHandler
 
     private record PageLayout(double WidthCm, double HeightCm,
         double MarginTopCm, double MarginBottomCm, double MarginLeftCm, double MarginRightCm,
-        double HeaderDistanceCm, double FooterDistanceCm);
+        double HeaderDistanceCm, double FooterDistanceCm,
+        double WidthPt, double HeightPt,
+        double MarginTopPt, double MarginBottomPt, double MarginLeftPt, double MarginRightPt,
+        double HeaderDistancePt, double FooterDistancePt);
 
     private PageLayout GetPageLayout()
     {
@@ -146,45 +258,78 @@ public partial class WordHandler
         var pgSz = sectPr?.GetFirstChild<PageSize>();
         var pgMar = sectPr?.GetFirstChild<PageMargin>();
         const double c = 2.54 / 1440.0; // twips → cm
+        const double p = 1.0 / 20.0;    // twips → pt (exact)
+        var wTwips = (double)(pgSz?.Width?.Value ?? 11906);
+        var hTwips = (double)(pgSz?.Height?.Value ?? 16838);
+        var tTwips = (double)(pgMar?.Top?.Value ?? 1440);
+        var bTwips = (double)(pgMar?.Bottom?.Value ?? 1440);
+        var lTwips = (double)(pgMar?.Left?.Value ?? 1440u);
+        var rTwips = (double)(pgMar?.Right?.Value ?? 1440u);
+        var hdTwips = (double)(pgMar?.Header?.Value ?? 851u);
+        var fdTwips = (double)(pgMar?.Footer?.Value ?? 992u);
         var result = new PageLayout(
-            (pgSz?.Width?.Value ?? 11906) * c,
-            (pgSz?.Height?.Value ?? 16838) * c,
-            (double)(pgMar?.Top?.Value ?? 1440) * c,
-            (double)(pgMar?.Bottom?.Value ?? 1440) * c,
-            (pgMar?.Left?.Value ?? 1440u) * c,
-            (pgMar?.Right?.Value ?? 1440u) * c,
-            (pgMar?.Header?.Value ?? 851u) * c,
-            (pgMar?.Footer?.Value ?? 992u) * c);
+            wTwips * c, hTwips * c, tTwips * c, bTwips * c, lTwips * c, rTwips * c, hdTwips * c, fdTwips * c,
+            wTwips * p, hTwips * p, tTwips * p, bTwips * p, lTwips * p, rTwips * p, hdTwips * p, fdTwips * p);
         if (_ctx != null) _ctx.CachedPageLayout = result;
         return result;
     }
 
-    private record DocDef(string Font, double SizePt, double LineHeight, string Color);
+    private record DocDef(string Font, double SizePt, double LineHeight, string Color, double GridLinePitchPt);
 
     private DocDef ReadDocDefaults()
     {
         var defs = _doc.MainDocumentPart?.StyleDefinitionsPart?.Styles?.DocDefaults;
         var rPr = defs?.RunPropertiesDefault?.RunPropertiesBaseStyle;
 
-        // Font: docDefaults rFonts → theme minor font → fallback
+        // Find default paragraph style (Normal) for fallback
+        var defaultStyle = _doc.MainDocumentPart?.StyleDefinitionsPart?.Styles
+            ?.Elements<Style>().FirstOrDefault(s => s.Default?.Value == true && s.Type?.Value == StyleValues.Paragraph);
+        var defaultRPr = defaultStyle?.StyleRunProperties;
+
+        // Font: docDefaults rFonts → Normal style rFonts → theme minor font → fallback
         var fonts = rPr?.RunFonts;
         var font = NonEmpty(fonts?.EastAsia?.Value) ?? NonEmpty(fonts?.Ascii?.Value) ?? NonEmpty(fonts?.HighAnsi?.Value);
+        if (font == null)
+        {
+            var nFonts = defaultRPr?.RunFonts;
+            font = NonEmpty(nFonts?.EastAsia?.Value) ?? NonEmpty(nFonts?.Ascii?.Value) ?? NonEmpty(nFonts?.HighAnsi?.Value);
+        }
         if (font == null)
         {
             var minor = _doc.MainDocumentPart?.ThemePart?.Theme?.ThemeElements?.FontScheme?.MinorFont;
             font = NonEmpty(minor?.EastAsianFont?.Typeface) ?? NonEmpty(minor?.LatinFont?.Typeface);
         }
 
-        // Size: half-points → pt
-        double sizePt = 10.5;
+        // Size: docDefaults → Normal style → fallback (half-points → pt)
+        double sizePt = 0;
         if (rPr?.FontSize?.Val?.Value is string sz && int.TryParse(sz, out var hp))
             sizePt = hp / 2.0;
+        if (sizePt == 0 && defaultRPr?.FontSize?.Val?.Value is string nsz && int.TryParse(nsz, out var nhp))
+            sizePt = nhp / 2.0;
+        if (sizePt == 0) sizePt = 10.5;
 
-        // Line spacing from pPrDefault
-        double lineH = 1.15;
+        // Line spacing: docDefaults pPrDefault → Normal style pPr → fallback
+        double lineH = 0;
         var sp = defs?.ParagraphPropertiesDefault?.ParagraphPropertiesBaseStyle?.SpacingBetweenLines;
         if (sp?.Line?.Value is string lv && int.TryParse(lv, out var lvi) && sp.LineRule?.InnerText is "auto" or null)
             lineH = lvi / 240.0;
+        if (lineH == 0)
+        {
+            var nsp = defaultStyle?.StyleParagraphProperties?.SpacingBetweenLines;
+            if (nsp?.Line?.Value is string nlv && int.TryParse(nlv, out var nlvi) && nsp.LineRule?.InnerText is "auto" or null)
+                lineH = nlvi / 240.0;
+        }
+        if (lineH == 0) lineH = 1.0; // Word default single-line spacing
+
+        // docGrid linePitch — controls CJK snap-to-grid line spacing (twips → pt)
+        double gridLinePitchPt = 0;
+        var sectPr = _doc.MainDocumentPart?.Document?.Body?.GetFirstChild<SectionProperties>();
+        var docGrid = sectPr?.GetFirstChild<DocGrid>();
+        if (docGrid?.Type?.Value == DocGridValues.Lines || docGrid?.Type?.Value == DocGridValues.LinesAndChars)
+        {
+            if (docGrid.LinePitch?.Value is int lp && lp > 0)
+                gridLinePitchPt = lp / 20.0; // twips to pt
+        }
 
         // Default text color: docDefaults → theme dk1
         var color = "#000000";
@@ -192,7 +337,7 @@ public partial class WordHandler
         if (cv != null && cv != "auto") color = $"#{cv}";
         else if (GetThemeColors().TryGetValue("dk1", out var dk1)) color = $"#{dk1}";
 
-        return new DocDef(font ?? "Calibri", sizePt, lineH, color);
+        return new DocDef(font ?? "Calibri", sizePt, lineH, color, gridLinePitchPt);
     }
 
     private static string? NonEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
