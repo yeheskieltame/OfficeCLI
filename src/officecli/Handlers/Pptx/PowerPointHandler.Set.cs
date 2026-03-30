@@ -1088,6 +1088,29 @@ public partial class PowerPointHandler
                     }
                     case "targets":
                         break; // consumed by align/distribute
+                    case "layout":
+                    {
+                        // Change slide layout
+                        var presentationPart = _doc.PresentationPart
+                            ?? throw new InvalidOperationException("No presentation part");
+                        var allLayouts = presentationPart.SlideMasterParts
+                            .SelectMany(m => m.SlideLayoutParts).ToList();
+                        var targetLayout = allLayouts.FirstOrDefault(lp =>
+                            lp.SlideLayout?.CommonSlideData?.Name?.Value?.Equals(value, StringComparison.OrdinalIgnoreCase) == true);
+                        if (targetLayout == null)
+                        {
+                            var availableNames = allLayouts
+                                .Select(lp => lp.SlideLayout?.CommonSlideData?.Name?.Value)
+                                .Where(n => n != null)
+                                .ToList();
+                            throw new ArgumentException($"Layout '{value}' not found. Available layouts: {string.Join(", ", availableNames)}");
+                        }
+                        // Point the slide's layout relationship to the new layout
+                        if (slidePart2.SlideLayoutPart != null)
+                            slidePart2.DeletePart(slidePart2.SlideLayoutPart);
+                        slidePart2.AddPart(targetLayout);
+                        break;
+                    }
                     default:
                         if (!GenericXmlQuery.SetGenericAttribute(slide2, key, value))
                         {

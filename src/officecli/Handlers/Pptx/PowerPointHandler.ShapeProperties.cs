@@ -757,6 +757,14 @@ public partial class PowerPointHandler
                     break;
                 }
 
+                case "alt" or "alttext" or "description":
+                {
+                    var nvPr = shape.NonVisualShapeProperties?.NonVisualDrawingProperties;
+                    if (nvPr != null) nvPr.Description = value;
+                    else unsupported.Add(key);
+                    break;
+                }
+
                 case "formula":
                 {
                     // Replace equation content in shape (a14:m > m:oMathPara > m:oMath)

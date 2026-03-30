@@ -33,7 +33,7 @@ public partial class WordHandler
         }
 
         // Document-level properties (including find/replace)
-        if (path == "/" || path == "")
+        if (path == "/" || path == "" || path.Equals("/body", StringComparison.OrdinalIgnoreCase))
         {
             // Find & Replace: special handling before document properties
             if (properties.TryGetValue("find", out var findText) && properties.TryGetValue("replace", out var replaceText))
@@ -1973,7 +1973,7 @@ public partial class WordHandler
                 indentH.Hanging = ParseHelpers.SafeParseUint(value, "hangingindent").ToString();
                 indentH.FirstLine = null;
                 return true;
-            case "keepnext":
+            case "keepnext" or "keepwithnext":
                 if (IsTruthy(value)) pProps.KeepNext ??= new KeepNext();
                 else pProps.KeepNext = null;
                 return true;
@@ -1985,7 +1985,7 @@ public partial class WordHandler
                 if (IsTruthy(value)) pProps.PageBreakBefore ??= new PageBreakBefore();
                 else pProps.PageBreakBefore = null;
                 return true;
-            case "widowcontrol":
+            case "widowcontrol" or "widoworphan":
                 if (IsTruthy(value)) pProps.WidowControl ??= new WidowControl();
                 else pProps.WidowControl = new WidowControl { Val = false };
                 return true;

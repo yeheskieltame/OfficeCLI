@@ -969,7 +969,7 @@ public partial class ExcelHandler
 
             switch (key.ToLowerInvariant())
             {
-                case "value":
+                case "value" or "text":
                     var cellValue = value.Replace("\\n", "\n"); // Support escaped newlines
                     cell.CellFormula = null; // Clear formula when explicit value is set
                     // If cell is already boolean type, convert true/false to 1/0
