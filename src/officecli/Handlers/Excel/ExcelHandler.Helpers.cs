@@ -59,6 +59,25 @@ public partial class ExcelHandler
         part.Worksheet ?? throw new InvalidOperationException("Corrupt file: worksheet data missing");
 
     /// <summary>
+    /// Insert a ConditionalFormatting element after all existing CF elements (preserving add order).
+    /// Falls back to after sheetData if no CF exists yet.
+    /// </summary>
+    private static void InsertConditionalFormatting(Worksheet ws, ConditionalFormatting cfElement)
+    {
+        var lastCf = ws.Elements<ConditionalFormatting>().LastOrDefault();
+        if (lastCf != null)
+            lastCf.InsertAfterSelf(cfElement);
+        else
+        {
+            var sheetData = ws.GetFirstChild<SheetData>();
+            if (sheetData != null)
+                sheetData.InsertAfterSelf(cfElement);
+            else
+                ws.AppendChild(cfElement);
+        }
+    }
+
+    /// <summary>
     /// Compute the next available CF priority for a worksheet (max existing + 1).
     /// </summary>
     private static int NextCfPriority(Worksheet ws)

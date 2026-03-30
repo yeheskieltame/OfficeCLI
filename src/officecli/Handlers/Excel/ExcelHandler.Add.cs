@@ -590,7 +590,7 @@ public partial class ExcelHandler
                 var cfWorksheet = FindWorksheet(cfSheetName)
                     ?? throw new ArgumentException($"Sheet not found: {cfSheetName}");
 
-                var sqref = properties.GetValueOrDefault("sqref") ?? properties.GetValueOrDefault("ref", "A1:A10");
+                var sqref = properties.GetValueOrDefault("sqref") ?? properties.GetValueOrDefault("range") ?? properties.GetValueOrDefault("ref", "A1:A10");
                 var minVal = properties.ContainsKey("min") ? properties["min"] : (string?)null;
                 var maxVal = properties.ContainsKey("max") ? properties["max"] : (string?)null;
                 var cfColor = properties.GetValueOrDefault("color", "638EC6");
@@ -621,13 +621,8 @@ public partial class ExcelHandler
                         sqref.Split(' ').Select(s => new StringValue(s)))
                 };
 
-                // Insert after sheetData (or after existing elements)
                 var wsElement = GetSheet(cfWorksheet);
-                var sheetDataEl = wsElement.GetFirstChild<SheetData>();
-                if (sheetDataEl != null)
-                    sheetDataEl.InsertAfterSelf(cf);
-                else
-                    wsElement.Append(cf);
+                InsertConditionalFormatting(wsElement, cf);
 
                 SaveWorksheet(cfWorksheet);
                 var dbCfCount = wsElement.Elements<ConditionalFormatting>().Count();
@@ -641,7 +636,7 @@ public partial class ExcelHandler
                 var csWorksheet = FindWorksheet(csSheetName)
                     ?? throw new ArgumentException($"Sheet not found: {csSheetName}");
 
-                var csSqref = properties.GetValueOrDefault("sqref", "A1:A10");
+                var csSqref = properties.GetValueOrDefault("sqref") ?? properties.GetValueOrDefault("range", "A1:A10");
                 var minColor = properties.GetValueOrDefault("mincolor", "F8696B");
                 var maxColor = properties.GetValueOrDefault("maxcolor", "63BE7B");
                 var midColor = properties.GetValueOrDefault("midcolor");
@@ -676,11 +671,7 @@ public partial class ExcelHandler
                 };
 
                 var csWsElement = GetSheet(csWorksheet);
-                var csSheetDataEl = csWsElement.GetFirstChild<SheetData>();
-                if (csSheetDataEl != null)
-                    csSheetDataEl.InsertAfterSelf(csCf);
-                else
-                    csWsElement.Append(csCf);
+                InsertConditionalFormatting(csWsElement, csCf);
 
                 SaveWorksheet(csWorksheet);
                 var csCfCount = csWsElement.Elements<ConditionalFormatting>().Count();
@@ -694,7 +685,7 @@ public partial class ExcelHandler
                 var isWorksheet = FindWorksheet(isSheetName)
                     ?? throw new ArgumentException($"Sheet not found: {isSheetName}");
 
-                var isSqref = properties.GetValueOrDefault("sqref", "A1:A10");
+                var isSqref = properties.GetValueOrDefault("sqref") ?? properties.GetValueOrDefault("range", "A1:A10");
                 var iconSetName = properties.GetValueOrDefault("iconset") ?? properties.GetValueOrDefault("icons", "3TrafficLights1");
                 var reverse = properties.TryGetValue("reverse", out var revVal) && IsTruthy(revVal);
                 var showValue = !properties.TryGetValue("showvalue", out var svVal) || IsTruthy(svVal);
@@ -737,11 +728,7 @@ public partial class ExcelHandler
                 };
 
                 var isWsElement = GetSheet(isWorksheet);
-                var isSheetDataEl = isWsElement.GetFirstChild<SheetData>();
-                if (isSheetDataEl != null)
-                    isSheetDataEl.InsertAfterSelf(isCf);
-                else
-                    isWsElement.Append(isCf);
+                InsertConditionalFormatting(isWsElement, isCf);
 
                 SaveWorksheet(isWorksheet);
                 var isCfCount = isWsElement.Elements<ConditionalFormatting>().Count();
@@ -755,7 +742,7 @@ public partial class ExcelHandler
                 var fcfWorksheet = FindWorksheet(fcfSheetName)
                     ?? throw new ArgumentException($"Sheet not found: {fcfSheetName}");
 
-                var fcfSqref = properties.GetValueOrDefault("sqref", "A1:A10");
+                var fcfSqref = properties.GetValueOrDefault("sqref") ?? properties.GetValueOrDefault("range", "A1:A10");
                 var fcfFormula = properties.GetValueOrDefault("formula")
                     ?? throw new ArgumentException("Formula-based conditional formatting requires 'formula' property (e.g. formula=$A1>100)");
 
@@ -820,11 +807,7 @@ public partial class ExcelHandler
                 };
 
                 var fcfWsElement = GetSheet(fcfWorksheet);
-                var fcfSheetDataEl = fcfWsElement.GetFirstChild<SheetData>();
-                if (fcfSheetDataEl != null)
-                    fcfSheetDataEl.InsertAfterSelf(fcfCf);
-                else
-                    fcfWsElement.Append(fcfCf);
+                InsertConditionalFormatting(fcfWsElement, fcfCf);
 
                 SaveWorksheet(fcfWorksheet);
                 var fcfCfCount = fcfWsElement.Elements<ConditionalFormatting>().Count();
@@ -1757,7 +1740,7 @@ public partial class ExcelHandler
                 var cfNewSheetName = cfNewSegments[0];
                 var cfNewWorksheet = FindWorksheet(cfNewSheetName)
                     ?? throw new ArgumentException($"Sheet not found: {cfNewSheetName}");
-                var cfNewSqref = properties.GetValueOrDefault("sqref") ?? properties.GetValueOrDefault("ref", "A1:A10");
+                var cfNewSqref = properties.GetValueOrDefault("sqref") ?? properties.GetValueOrDefault("range") ?? properties.GetValueOrDefault("ref", "A1:A10");
                 var cfNewPriority = NextCfPriority(GetSheet(cfNewWorksheet));
 
                 ConditionalFormattingRule cfNewRule;
@@ -1919,11 +1902,7 @@ public partial class ExcelHandler
                 };
 
                 var cfNewWs = GetSheet(cfNewWorksheet);
-                var cfNewSheetData = cfNewWs.GetFirstChild<SheetData>();
-                if (cfNewSheetData != null)
-                    cfNewSheetData.InsertAfterSelf(cfNewFormatting);
-                else
-                    cfNewWs.AppendChild(cfNewFormatting);
+                InsertConditionalFormatting(cfNewWs, cfNewFormatting);
 
                 SaveWorksheet(cfNewWorksheet);
                 var cfNewCount = cfNewWs.Elements<ConditionalFormatting>().Count();
