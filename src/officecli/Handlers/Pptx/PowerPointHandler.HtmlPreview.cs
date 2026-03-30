@@ -121,7 +121,7 @@ public partial class PowerPointHandler
             try {
                 katex.render(el.dataset.formula, el, { throwOnError: false, displayMode: true });
                 el.classList.add('katex-rendered');
-            } catch(e) { el.textContent = el.dataset.formula; }
+            } catch(e) { el.textContent = el.dataset.formula + ' (Error: ' + e.message + '. See https://katex.org/docs/supported.html for supported syntax.)'; }
         });
     }
     // Initial render

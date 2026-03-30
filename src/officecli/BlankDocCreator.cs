@@ -200,6 +200,24 @@ public static class BlankDocCreator
         twoContentLayoutPart.SlideLayout.Save();
         twoContentLayoutPart.AddPart(slideMasterPart);
 
+        // Layout 5: Title Only (title placeholder, no body)
+        var titleOnlyLayoutPart = slideMasterPart.AddNewPart<DocumentFormat.OpenXml.Packaging.SlideLayoutPart>("rId5");
+        titleOnlyLayoutPart.SlideLayout = new DocumentFormat.OpenXml.Presentation.SlideLayout(
+            new DocumentFormat.OpenXml.Presentation.CommonSlideData(
+                new DocumentFormat.OpenXml.Presentation.ShapeTree(
+                    new DocumentFormat.OpenXml.Presentation.NonVisualGroupShapeProperties(
+                        new DocumentFormat.OpenXml.Presentation.NonVisualDrawingProperties { Id = 1, Name = "" },
+                        new DocumentFormat.OpenXml.Presentation.NonVisualGroupShapeDrawingProperties(),
+                        new DocumentFormat.OpenXml.Presentation.ApplicationNonVisualDrawingProperties()
+                    ),
+                    new DocumentFormat.OpenXml.Presentation.GroupShapeProperties(),
+                    CreateLayoutPlaceholder(2, "Title", PlaceholderValues.Title, 838200, 365125, 10515600, 1325563)
+                )
+            ) { Name = "Title Only" }
+        ) { Type = DocumentFormat.OpenXml.Presentation.SlideLayoutValues.TitleOnly };
+        titleOnlyLayoutPart.SlideLayout.Save();
+        titleOnlyLayoutPart.AddPart(slideMasterPart);
+
         slideMasterPart.SlideMaster = new DocumentFormat.OpenXml.Presentation.SlideMaster(
             new DocumentFormat.OpenXml.Presentation.CommonSlideData(
                 new DocumentFormat.OpenXml.Presentation.ShapeTree(
@@ -230,7 +248,8 @@ public static class BlankDocCreator
                 new DocumentFormat.OpenXml.Presentation.SlideLayoutId { Id = 2147483649, RelationshipId = "rId1" },
                 new DocumentFormat.OpenXml.Presentation.SlideLayoutId { Id = 2147483650, RelationshipId = "rId2" },
                 new DocumentFormat.OpenXml.Presentation.SlideLayoutId { Id = 2147483651, RelationshipId = "rId3" },
-                new DocumentFormat.OpenXml.Presentation.SlideLayoutId { Id = 2147483652, RelationshipId = "rId4" }
+                new DocumentFormat.OpenXml.Presentation.SlideLayoutId { Id = 2147483652, RelationshipId = "rId4" },
+                new DocumentFormat.OpenXml.Presentation.SlideLayoutId { Id = 2147483653, RelationshipId = "rId5" }
             )
         );
         slideMasterPart.SlideMaster.Save();

@@ -171,7 +171,7 @@ public partial class WordHandler
         sb.AppendLine("function _wordInit(){");
         sb.AppendLine("  if(typeof katex!=='undefined'){");
         sb.AppendLine("    document.querySelectorAll('.katex-formula:not(.katex-rendered)').forEach(function(el){");
-        sb.AppendLine("      try{katex.render(el.dataset.formula,el,{throwOnError:false,displayMode:!!el.dataset.display});}catch(e){}");
+        sb.AppendLine("      try{katex.render(el.dataset.formula,el,{throwOnError:false,displayMode:!!el.dataset.display});}catch(e){el.textContent=el.dataset.formula+' (Error: '+e.message+'. See https://katex.org/docs/supported.html for supported syntax.)';}");
         sb.AppendLine("      el.classList.add('katex-rendered');");
         sb.AppendLine("    });");
         sb.AppendLine("  }");

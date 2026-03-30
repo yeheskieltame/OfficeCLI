@@ -37,14 +37,24 @@ public static class FormulaParser
 {
     // ==================== LaTeX → OMML ====================
 
+    private const string KatexDocsHint = "See https://katex.org/docs/supported.html for supported syntax.";
+
     public static OpenXmlElement Parse(string latex)
     {
-        // Preprocess: convert {a \over b} to \frac{a}{b}
-        latex = RewriteOver(latex);
-        var tokens = Tokenize(latex);
-        var pos = 0;
-        var nodes = ParseGroup(tokens, ref pos, false);
-        return WrapInOfficeMath(nodes);
+        try
+        {
+            // Preprocess: convert {a \over b} to \frac{a}{b}
+            latex = RewriteOver(latex);
+            var tokens = Tokenize(latex);
+            var pos = 0;
+            var nodes = ParseGroup(tokens, ref pos, false);
+            return WrapInOfficeMath(nodes);
+        }
+        catch (Exception ex)
+        {
+            throw new FormulaParseException(
+                $"Failed to parse formula: {ex.Message} {KatexDocsHint}", ex);
+        }
     }
 
     /// <summary>
@@ -1469,4 +1479,13 @@ public static class FormulaParser
             _ => c
         }));
     }
+}
+
+/// <summary>
+/// Exception thrown when FormulaParser fails to parse a LaTeX formula.
+/// </summary>
+public class FormulaParseException : Exception
+{
+    public FormulaParseException(string message, Exception innerException)
+        : base(message, innerException) { }
 }
