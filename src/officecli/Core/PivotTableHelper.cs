@@ -165,6 +165,10 @@ internal static class PivotTableHelper
 
     private static string GetCellText(Cell cell, SharedStringTablePart? sst)
     {
+        // Handle InlineString cells (t="inlineStr") — used by openpyxl and some other tools
+        if (cell.DataType?.Value == CellValues.InlineString)
+            return cell.InlineString?.InnerText ?? "";
+
         var value = cell.CellValue?.Text ?? "";
         if (cell.DataType?.Value == CellValues.SharedString && sst?.SharedStringTable != null)
         {
@@ -529,17 +533,18 @@ internal static class PivotTableHelper
         var currentValues = ReadCurrentDataFields(pivotDef.DataFields);
 
         // Parse new assignments (or keep current)
+        // If user specified a non-empty value but nothing resolved, warn via stderr
         var rowFieldIndices = changes.ContainsKey("rows")
-            ? ParseFieldList(changes, "rows", headers)
+            ? ParseFieldListWithWarning(changes, "rows", headers)
             : currentRows;
         var colFieldIndices = changes.ContainsKey("cols")
-            ? ParseFieldList(changes, "cols", headers)
+            ? ParseFieldListWithWarning(changes, "cols", headers)
             : currentCols;
         var filterFieldIndices = changes.ContainsKey("filters")
-            ? ParseFieldList(changes, "filters", headers)
+            ? ParseFieldListWithWarning(changes, "filters", headers)
             : currentFilters;
         var valueFields = changes.ContainsKey("values")
-            ? ParseValueFields(changes, "values", headers)
+            ? ParseValueFieldsWithWarning(changes, "values", headers)
             : currentValues;
 
         // Layer 1: Reset all PivotField axis/dataField, then re-assign
@@ -696,6 +701,29 @@ internal static class PivotTableHelper
     }
 
     // ==================== Parse Helpers ====================
+
+    private static List<int> ParseFieldListWithWarning(Dictionary<string, string> props, string key, string[] headers)
+    {
+        var result = ParseFieldList(props, key, headers);
+        if (result.Count == 0 && props.TryGetValue(key, out var value) && !string.IsNullOrEmpty(value))
+        {
+            var available = string.Join(", ", headers.Where(h => !string.IsNullOrEmpty(h)));
+            Console.Error.WriteLine($"WARNING: No matching fields for {key}={value}. Available: {available}");
+        }
+        return result;
+    }
+
+    private static List<(int idx, string func, string name)> ParseValueFieldsWithWarning(
+        Dictionary<string, string> props, string key, string[] headers)
+    {
+        var result = ParseValueFields(props, key, headers);
+        if (result.Count == 0 && props.TryGetValue(key, out var value) && !string.IsNullOrEmpty(value))
+        {
+            var available = string.Join(", ", headers.Where(h => !string.IsNullOrEmpty(h)));
+            Console.Error.WriteLine($"WARNING: No matching fields for {key}={value}. Available: {available}");
+        }
+        return result;
+    }
 
     private static List<int> ParseFieldList(Dictionary<string, string> props, string key, string[] headers)
     {
