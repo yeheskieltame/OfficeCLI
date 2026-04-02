@@ -47,9 +47,15 @@ public partial class WordHandler
                     var fillMatch = System.Text.RegularExpressions.Regex.Match(xml, @"fillcolor=""([^""]*)""");
                     if (fillMatch.Success) node.Format["color"] = ParseHelpers.FormatHexColor(fillMatch.Groups[1].Value);
 
-                    // Extract opacity
+                    // Extract opacity — normalize to canonical decimal (e.g. ".5" → "0.5")
                     var opacityMatch = System.Text.RegularExpressions.Regex.Match(xml, @"opacity=""([^""]*)""");
-                    if (opacityMatch.Success) node.Format["opacity"] = opacityMatch.Groups[1].Value;
+                    if (opacityMatch.Success)
+                    {
+                        var rawOpacity = opacityMatch.Groups[1].Value;
+                        node.Format["opacity"] = double.TryParse(rawOpacity, System.Globalization.CultureInfo.InvariantCulture, out var opVal)
+                            ? opVal.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            : rawOpacity;
+                    }
 
                     // Extract font
                     var fontMatch = System.Text.RegularExpressions.Regex.Match(xml, @"font-family:&quot;([^&]*)&quot;");
