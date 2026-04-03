@@ -339,8 +339,9 @@ static partial class CommandBuilder
             }
             case "raw":
             {
-                var partPath = item.Part ?? "/document";
-                return handler.Raw(partPath, null, null, null);
+                if (string.IsNullOrEmpty(item.Part))
+                    throw new ArgumentException("'raw' command requires 'part' field. Example: {\"command\": \"raw\", \"part\": \"/document\"} (docx), {\"command\": \"raw\", \"part\": \"/presentation\"} (pptx), {\"command\": \"raw\", \"part\": \"/sheet[1]\"} (xlsx)");
+                return handler.Raw(item.Part, null, null, null);
             }
             case "raw-set":
             {
