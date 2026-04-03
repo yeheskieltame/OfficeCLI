@@ -408,7 +408,7 @@ public partial class WordHandler
       window._pendingScrollTo=null;
       window._pendingScrollBehavior=null;
       var _t;
-      if(_sel==='_last_page'){var _lb=document.querySelector('.page-wrapper:last-of-type .page-body');if(_lb){var _ck=Array.from(_lb.children).filter(function(c){return !c.classList.contains('footnotes');});_t=_ck[_ck.length-1]||_lb;}if(!_t){var _ap=document.querySelectorAll('.page');_t=_ap[_ap.length-1];}}
+      if(_sel==='_last_page'){var _lb=document.querySelector('.page-wrapper:last-of-type .page-body');if(_lb){var _ck=Array.from(_lb.children).filter(function(c){return !c.classList.contains('footnotes')&&c.style.display!=='none'&&c.offsetHeight>0;});_t=_ck[_ck.length-1]||_lb;}if(!_t){var _ap=document.querySelectorAll('.page');_t=_ap[_ap.length-1];}}
       else{_t=document.querySelector(_sel);if(!_t){var _ap=document.querySelectorAll('.page');_t=_ap[_ap.length-1];}}
       if(_t)_t.scrollIntoView({behavior:_beh,block:'center'});
     }
@@ -746,6 +746,9 @@ public partial class WordHandler
         var bodyColCount = GetSectionColumnCount(bodySectPr);
 
         int wParaCount = 0, wTableCount = 0;
+        int wBlockCount = 0;
+        bool inList = false;
+        int pendingBlockClose = 0; // block number that needs <!--wE:N--> before next block starts
         for (int ei = 0; ei < elements.Count; ei++)
         {
             var element = elements[ei];
@@ -753,6 +756,39 @@ public partial class WordHandler
             // Emit invisible anchors for watch scroll targeting
             if (element is Paragraph) { wParaCount++; sb.Append($"<a id=\"w-p-{wParaCount}\"></a>"); }
             else if (element is Table) { wTableCount++; sb.Append($"<a id=\"w-table-{wTableCount}\"></a>"); }
+
+            // Block markers for server-side diff: each top-level block gets <!--wB:N--> / <!--wE:N-->
+            // A "block" is: one paragraph, one table, one equation, OR an entire list (ul/ol group)
+            // SectionProperties are skipped (not visual content, no block)
+            if (element is SectionProperties) continue;
+            var isListItem = element is Paragraph p2 && GetParagraphListStyle(p2) != null;
+            if (!isListItem && inList)
+            {
+                // Leaving a list — close the list block
+                sb.Append($"<span class=\"we\" data-block=\"{wBlockCount}\" style=\"display:none\"></span>");
+                inList = false;
+                pendingBlockClose = 0;
+            }
+            // Close previous non-list block if pending
+            if (pendingBlockClose > 0)
+            {
+                sb.Append($"<span class=\"we\" data-block=\"{pendingBlockClose}\" style=\"display:none\"></span>");
+                pendingBlockClose = 0;
+            }
+            if (isListItem && !inList)
+            {
+                // Entering a list — open a new block
+                wBlockCount++;
+                sb.Append($"<span class=\"wb\" data-block=\"{wBlockCount}\" style=\"display:none\"></span>");
+                inList = true;
+            }
+            else if (!isListItem)
+            {
+                // Non-list element — each is its own block, close deferred to handle continue
+                wBlockCount++;
+                sb.Append($"<span class=\"wb\" data-block=\"{wBlockCount}\" style=\"display:none\"></span>");
+                pendingBlockClose = wBlockCount;
+            }
 
             // Check for inline section break (sectPr inside paragraph pPr) — handle column changes
             if (element is Paragraph sectPara && sectPara.ParagraphProperties?.GetFirstChild<SectionProperties>() != null)
@@ -1044,13 +1080,11 @@ public partial class WordHandler
                 CloseAllLists(sb, listStack, ref currentListType, ref pendingLiClose);
                 RenderTableHtml(sb, table);
             }
-            else if (element is SectionProperties)
-            {
-                // Skip — section properties are not visual content
-            }
-
         }
 
+        // Close any pending block (last element was non-list with continue, or last list block)
+        if (pendingBlockClose > 0) sb.Append($"<span class=\"we\" data-block=\"{pendingBlockClose}\" style=\"display:none\"></span>");
+        if (inList) sb.Append($"<span class=\"we\" data-block=\"{wBlockCount}\" style=\"display:none\"></span>");
         if (inMultiColumn) sb.AppendLine("</div>");
         CloseAllLists(sb, listStack, ref currentListType, ref pendingLiClose);
     }

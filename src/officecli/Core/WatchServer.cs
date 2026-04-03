@@ -23,6 +23,7 @@ public class WatchServer : IDisposable
     private readonly object _sseLock = new();
     private CancellationTokenSource _cts = new();
     private string _currentHtml = "";
+    private int _version = 0;
     private bool _disposed;
     private DateTime _lastActivityTime = DateTime.UtcNow;
     private readonly TimeSpan _idleTimeout;
@@ -157,10 +158,107 @@ public class WatchServer : IDisposable
                     else { var f=document.getElementById('_sse_freeze'); if(f)f.remove(); }
                 });
             }
+            // Track version for gap detection
+            var _clientVersion = 0;
+            // Apply server-side block patches directly to DOM
+            function wordPatchUpdate(msg) {
+                // De-paginate: merge pagination-created pages back into section wrappers
+                var allW = Array.from(document.querySelectorAll('.page-wrapper'));
+                var curSec = null;
+                allW.forEach(function(w) {
+                    if (w.hasAttribute('data-section')) { curSec = w; return; }
+                    if (!curSec) return;
+                    var src = w.querySelector('.page-body');
+                    var dst = curSec.querySelector('.page-body');
+                    if (src && dst) {
+                        Array.from(src.children).forEach(function(c) {
+                            if (!c.classList.contains('footnotes')) dst.appendChild(c);
+                        });
+                    }
+                    w.remove();
+                });
+                var contentAdded = false;
+                msg.patches.forEach(function(patch) {
+                    if (patch.op === 'style') {
+                        // Update CSS styles in head
+                        document.querySelectorAll('head style').forEach(function(s) { s.remove(); });
+                        var tmp = document.createElement('div');
+                        tmp.innerHTML = patch.html;
+                        tmp.querySelectorAll('style').forEach(function(s) { document.head.appendChild(s); });
+                        return;
+                    }
+                    var bStart = document.querySelector('.wb[data-block="' + patch.block + '"]');
+                    var bEnd = document.querySelector('.we[data-block="' + patch.block + '"]');
+                    if (patch.op === 'remove') {
+                        if (bStart && bEnd) {
+                            // Remove everything between bStart and bEnd (inclusive)
+                            var cur = bStart.nextSibling;
+                            while (cur && cur !== bEnd) { var nx = cur.nextSibling; cur.remove(); cur = nx; }
+                            bEnd.remove();
+                            bStart.remove();
+                        }
+                    } else if (patch.op === 'replace') {
+                        if (bStart && bEnd) {
+                            // Remove old content between markers
+                            var cur = bStart.nextSibling;
+                            while (cur && cur !== bEnd) { var nx = cur.nextSibling; cur.remove(); cur = nx; }
+                            // Insert new content before bEnd
+                            var tmp = document.createElement('div');
+                            tmp.innerHTML = patch.html;
+                            while (tmp.firstChild) bEnd.parentNode.insertBefore(tmp.firstChild, bEnd);
+                        }
+                    } else if (patch.op === 'add') {
+                        contentAdded = true;
+                        var tmp = document.createElement('div');
+                        tmp.innerHTML = '<span class="wb" data-block="' + patch.block + '" style="display:none"></span>' +
+                            patch.html +
+                            '<span class="we" data-block="' + patch.block + '" style="display:none"></span>';
+                        // Find insertion point: after previous block's end, or before next block's begin
+                        var prevEnd = patch.block > 1 ? document.querySelector('.we[data-block="' + (patch.block - 1) + '"]') : null;
+                        if (prevEnd) {
+                            var ref = prevEnd.nextSibling;
+                            while (tmp.firstChild) prevEnd.parentNode.insertBefore(tmp.firstChild, ref);
+                        } else {
+                            var nextBegin = document.querySelector('.wb[data-block="' + (patch.block + 1) + '"]');
+                            if (nextBegin) {
+                                // Also include the anchor before nextBegin if present
+                                var ref = nextBegin.previousSibling && nextBegin.previousSibling.tagName === 'A' ? nextBegin.previousSibling : nextBegin;
+                                while (tmp.firstChild) ref.parentNode.insertBefore(tmp.firstChild, ref);
+                            } else {
+                                // Last resort: append to the closest page-body
+                                var body = document.querySelector('.page-body');
+                                while (tmp.firstChild) body.appendChild(tmp.firstChild);
+                            }
+                        }
+                    }
+                });
+                // Set scroll target
+                if (contentAdded) {
+                    window._pendingScrollTo = '_last_page';
+                    window._pendingScrollBehavior = 'instant';
+                } else if (msg.scrollTo) {
+                    window._pendingScrollTo = msg.scrollTo;
+                }
+                _clientVersion = msg.version;
+                // Re-paginate + render new KaTeX/CJK
+                if (typeof window._wordPaginate === 'function') window._wordPaginate();
+            }
             es.addEventListener('update', function(e) {
                 var msg = JSON.parse(e.data);
+                // Track version
+                if (msg.version !== undefined) _clientVersion = msg.version;
+                if (msg.action === 'word-patch') {
+                    // Version gap check: if we missed messages, fallback to full
+                    if (msg.baseVersion !== 0 && msg.baseVersion !== _clientVersion) {
+                        wordDiffUpdate(msg);
+                        if (msg.version !== undefined) _clientVersion = msg.version;
+                        return;
+                    }
+                    wordPatchUpdate(msg);
+                    return;
+                }
                 if (msg.action === 'full') {
-                    // Word: diff-based update (no full body replacement)
+                    // Word: fallback diff-based update
                     if (document.querySelector('.page-wrapper[data-section]')) {
                         wordDiffUpdate(msg);
                         return;
@@ -420,6 +518,9 @@ public class WatchServer : IDisposable
             var msg = JsonSerializer.Deserialize(json, WatchMessageJsonContext.Default.WatchMessage);
             if (msg == null) return;
 
+            var oldHtml = _currentHtml;
+            var baseVersion = _version;
+
             // Always update cached full HTML when provided (authoritative snapshot)
             if (!string.IsNullOrEmpty(msg.FullHtml))
             {
@@ -437,13 +538,36 @@ public class WatchServer : IDisposable
                     _currentHtml = RemoveSlideFromHtml(_currentHtml, msg.Slide);
             }
 
-            // Forward to SSE clients
-            SendSseEvent(msg.Action, msg.Slide, msg.Html, msg.ScrollTo);
+            _version++;
+
+            // Word: try block-level diff instead of full refresh
+            if (msg.Action == "full" && !string.IsNullOrEmpty(msg.FullHtml)
+                && !string.IsNullOrEmpty(oldHtml) && oldHtml.Contains("data-block=\"1\""))
+            {
+                var patches = ComputeWordPatches(oldHtml, msg.FullHtml);
+                // Check if CSS styles changed
+                var oldStyle = ExtractStyleBlock(oldHtml);
+                var newStyle = ExtractStyleBlock(msg.FullHtml);
+                var styleChanged = oldStyle != newStyle;
+
+                if (patches != null || styleChanged)
+                {
+                    patches ??= new List<WordPatch>();
+                    if (styleChanged)
+                        patches.Insert(0, new WordPatch { Op = "style", Block = 0, Html = newStyle });
+                    SendSseWordPatch(patches, _version, baseVersion, msg.ScrollTo);
+                    return;
+                }
+            }
+
+            // Forward to SSE clients (full or PPT incremental)
+            SendSseEvent(msg.Action, msg.Slide, msg.Html, msg.ScrollTo, _version);
         }
         catch
         {
             // Legacy format or parse error — treat as full refresh signal
-            SendSseEvent("full", 0, null);
+            _version++;
+            SendSseEvent("full", 0, null, null, _version);
         }
     }
 
@@ -512,12 +636,132 @@ public class WatchServer : IDisposable
         return (-1, -1);
     }
 
-    private void SendSseEvent(string action, int slideNum, string? html, string? scrollTo = null)
+    /// <summary>Extract all &lt;style&gt; blocks from HTML head, concatenated.</summary>
+    private static string? ExtractStyleBlock(string html)
+    {
+        var sb = new StringBuilder();
+        var idx = 0;
+        while (true)
+        {
+            var start = html.IndexOf("<style>", idx, StringComparison.OrdinalIgnoreCase);
+            if (start < 0) start = html.IndexOf("<style ", idx, StringComparison.OrdinalIgnoreCase);
+            if (start < 0) break;
+            var end = html.IndexOf("</style>", start, StringComparison.OrdinalIgnoreCase);
+            if (end < 0) break;
+            end += 8; // include </style>
+            sb.Append(html, start, end - start);
+            idx = end;
+        }
+        return sb.Length > 0 ? sb.ToString() : null;
+    }
+
+    /// <summary>Split Word HTML into blocks keyed by block number. Returns dict of blockNum → content.</summary>
+    private static Dictionary<int, string> SplitWordBlocks(string html)
+    {
+        var blocks = new Dictionary<int, string>();
+        var beginRx = new System.Text.RegularExpressions.Regex(@"<span class=""wb"" data-block=""(\d+)"" style=""display:none""></span>");
+        var matches = beginRx.Matches(html);
+        for (int i = 0; i < matches.Count; i++)
+        {
+            var m = matches[i];
+            var blockNum = int.Parse(m.Groups[1].Value);
+            var contentStart = m.Index + m.Length;
+            var endMarker = $"<span class=\"we\" data-block=\"{blockNum}\" style=\"display:none\"></span>";
+            var endIdx = html.IndexOf(endMarker, contentStart, StringComparison.Ordinal);
+            if (endIdx >= 0)
+                blocks[blockNum] = html[contentStart..endIdx];
+        }
+        return blocks;
+    }
+
+    /// <summary>Compute block-level patches between old and new Word HTML. Returns null if diff is too large (fallback to full).</summary>
+    internal static List<WordPatch>? ComputeWordPatches(string oldHtml, string newHtml)
+    {
+        // Only diff if both are Word documents with block markers
+        if (string.IsNullOrEmpty(oldHtml) || string.IsNullOrEmpty(newHtml))
+            return null;
+        if (!oldHtml.Contains("data-block=\"1\"") || !newHtml.Contains("data-block=\"1\""))
+            return null;
+
+        var oldBlocks = SplitWordBlocks(oldHtml);
+        var newBlocks = SplitWordBlocks(newHtml);
+
+        if (oldBlocks.Count == 0 && newBlocks.Count == 0) return null;
+
+        var patches = new List<WordPatch>();
+
+        // Find max block number across both
+        var maxBlock = 0;
+        foreach (var k in oldBlocks.Keys) if (k > maxBlock) maxBlock = k;
+        foreach (var k in newBlocks.Keys) if (k > maxBlock) maxBlock = k;
+
+        for (int b = 1; b <= maxBlock; b++)
+        {
+            var inOld = oldBlocks.TryGetValue(b, out var oldContent);
+            var inNew = newBlocks.TryGetValue(b, out var newContent);
+
+            if (inOld && inNew)
+            {
+                if (oldContent != newContent)
+                    patches.Add(new WordPatch { Op = "replace", Block = b, Html = newContent });
+                // else: unchanged, skip
+            }
+            else if (!inOld && inNew)
+            {
+                patches.Add(new WordPatch { Op = "add", Block = b, Html = newContent });
+            }
+            else if (inOld && !inNew)
+            {
+                patches.Add(new WordPatch { Op = "remove", Block = b });
+            }
+        }
+
+        if (patches.Count == 0) return null; // no changes
+
+        // If more than 60% of blocks changed (and enough blocks to matter), fallback to full refresh
+        var totalBlocks = Math.Max(oldBlocks.Count, newBlocks.Count);
+        if (totalBlocks >= 5 && patches.Count > totalBlocks * 0.6)
+            return null;
+
+        return patches;
+    }
+
+    private void SendSseWordPatch(List<WordPatch> patches, int version, int baseVersion, string? scrollTo)
+    {
+        var sb = new StringBuilder();
+        sb.Append("{\"action\":\"word-patch\"");
+        sb.Append(",\"version\":").Append(version);
+        sb.Append(",\"baseVersion\":").Append(baseVersion);
+        sb.Append(",\"patches\":[");
+        for (int i = 0; i < patches.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append("{\"op\":\"").Append(patches[i].Op).Append('"');
+            sb.Append(",\"block\":").Append(patches[i].Block);
+            if (patches[i].Html != null)
+            {
+                sb.Append(",\"html\":");
+                AppendJsonString(sb, patches[i].Html!);
+            }
+            sb.Append('}');
+        }
+        sb.Append(']');
+        if (scrollTo != null)
+        {
+            sb.Append(",\"scrollTo\":");
+            AppendJsonString(sb, scrollTo);
+        }
+        sb.Append('}');
+        BroadcastSse(sb.ToString());
+    }
+
+    private void SendSseEvent(string action, int slideNum, string? html, string? scrollTo = null, int version = 0)
     {
         // Build JSON manually to avoid dependency
         var sb = new StringBuilder();
         sb.Append("{\"action\":\"").Append(action).Append('"');
         sb.Append(",\"slide\":").Append(slideNum);
+        sb.Append(",\"version\":").Append(version);
         if (html != null)
         {
             sb.Append(",\"html\":");
@@ -530,8 +774,11 @@ public class WatchServer : IDisposable
         }
         sb.Append('}');
 
-        var sseJson = sb.ToString();
+        BroadcastSse(sb.ToString());
+    }
 
+    private void BroadcastSse(string sseJson)
+    {
         lock (_sseLock)
         {
             var dead = new List<NetworkStream>();

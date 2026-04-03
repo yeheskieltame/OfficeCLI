@@ -114,6 +114,15 @@ public class WatchMessage
     /// <summary>CSS selector for the element to scroll to after full refresh (Word/Excel)</summary>
     public string? ScrollTo { get; set; }
 
+    /// <summary>Incremental version number for ordering and gap detection.</summary>
+    public int Version { get; set; }
+
+    /// <summary>Version the client must have before applying these patches.</summary>
+    public int BaseVersion { get; set; }
+
+    /// <summary>Word block-level patches (for action="word-patch").</summary>
+    public List<WordPatch>? Patches { get; set; }
+
     public static int ExtractSlideNum(string? path)
     {
         if (string.IsNullOrEmpty(path)) return 0;
@@ -144,5 +153,19 @@ public class WatchMessage
     }
 }
 
+/// <summary>A single block-level change for Word incremental updates.</summary>
+public class WordPatch
+{
+    /// <summary>"replace", "add", or "remove"</summary>
+    public string Op { get; set; } = "";
+
+    /// <summary>Block number (matches <!--wB:N--> marker)</summary>
+    public int Block { get; set; }
+
+    /// <summary>New HTML content (null for remove)</summary>
+    public string? Html { get; set; }
+}
+
 [System.Text.Json.Serialization.JsonSerializable(typeof(WatchMessage))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(WordPatch))]
 internal partial class WatchMessageJsonContext : System.Text.Json.Serialization.JsonSerializerContext { }
