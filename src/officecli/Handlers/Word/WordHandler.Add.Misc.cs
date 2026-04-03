@@ -89,9 +89,16 @@ public partial class WordHandler
 
         if (properties.TryGetValue("text", out var bkText))
         {
-            parent.AppendChild(bookmarkStart);
-            parent.AppendChild(new Run(new Text(bkText) { Space = SpaceProcessingModeValues.Preserve }));
-            parent.AppendChild(bookmarkEnd);
+            // Try to find existing runs whose concatenated text contains the bookmark text
+            var runs = parent.Elements<Run>().ToList();
+            var wrapped = TryWrapExistingRunsWithBookmark(parent, runs, bkText, bookmarkStart, bookmarkEnd);
+            if (!wrapped)
+            {
+                // No matching text found — create a new run as fallback
+                parent.AppendChild(bookmarkStart);
+                parent.AppendChild(new Run(new Text(bkText) { Space = SpaceProcessingModeValues.Preserve }));
+                parent.AppendChild(bookmarkEnd);
+            }
         }
         else
         {
@@ -101,6 +108,99 @@ public partial class WordHandler
 
         var resultPath = $"{parentPath}/bookmark[{bkName}]";
         return resultPath;
+    }
+
+    /// <summary>
+    /// Tries to wrap existing runs whose concatenated text contains <paramref name="targetText"/>
+    /// with bookmarkStart/bookmarkEnd tags. Returns true if wrapping succeeded.
+    /// </summary>
+    private static bool TryWrapExistingRunsWithBookmark(
+        OpenXmlElement parent, List<Run> runs, string targetText,
+        BookmarkStart bookmarkStart, BookmarkEnd bookmarkEnd)
+    {
+        if (runs.Count == 0 || string.IsNullOrEmpty(targetText))
+            return false;
+
+        // Build a map: for each run, track the cumulative start offset and its text
+        var runTexts = new List<(Run Run, int Start, string Text)>();
+        var offset = 0;
+        foreach (var run in runs)
+        {
+            var t = string.Concat(run.Elements<Text>().Select(x => x.Text));
+            runTexts.Add((run, offset, t));
+            offset += t.Length;
+        }
+        var fullText = string.Concat(runTexts.Select(r => r.Text));
+
+        var matchIndex = fullText.IndexOf(targetText, StringComparison.Ordinal);
+        if (matchIndex < 0)
+            return false;
+
+        var matchEnd = matchIndex + targetText.Length;
+
+        // Find runs that overlap with [matchIndex, matchEnd)
+        var firstRunIdx = -1;
+        var lastRunIdx = -1;
+        for (var i = 0; i < runTexts.Count; i++)
+        {
+            var runStart = runTexts[i].Start;
+            var runEnd = runStart + runTexts[i].Text.Length;
+            if (runEnd <= matchIndex) continue;
+            if (runStart >= matchEnd) break;
+            if (firstRunIdx < 0) firstRunIdx = i;
+            lastRunIdx = i;
+        }
+
+        if (firstRunIdx < 0) return false;
+
+        // Handle partial overlap at the start: split the first run if needed
+        var firstRunInfo = runTexts[firstRunIdx];
+        if (matchIndex > firstRunInfo.Start)
+        {
+            var splitPos = matchIndex - firstRunInfo.Start;
+            var beforeText = firstRunInfo.Text[..splitPos];
+            var afterText = firstRunInfo.Text[splitPos..];
+
+            var beforeRun = (Run)firstRunInfo.Run.CloneNode(true);
+            SetRunText(beforeRun, beforeText);
+            parent.InsertBefore(beforeRun, firstRunInfo.Run);
+
+            SetRunText(firstRunInfo.Run, afterText);
+            // Update info
+            runTexts[firstRunIdx] = (firstRunInfo.Run, matchIndex, afterText);
+        }
+
+        // Handle partial overlap at the end: split the last run if needed
+        var lastRunInfo = runTexts[lastRunIdx];
+        var lastRunEnd = lastRunInfo.Start + lastRunInfo.Text.Length;
+        if (matchEnd < lastRunEnd)
+        {
+            var splitPos = matchEnd - lastRunInfo.Start;
+            var keepText = lastRunInfo.Text[..splitPos];
+            var tailText = lastRunInfo.Text[splitPos..];
+
+            var tailRun = (Run)lastRunInfo.Run.CloneNode(true);
+            SetRunText(tailRun, tailText);
+            parent.InsertAfter(tailRun, lastRunInfo.Run);
+
+            SetRunText(lastRunInfo.Run, keepText);
+            runTexts[lastRunIdx] = (lastRunInfo.Run, lastRunInfo.Start, keepText);
+        }
+
+        // Insert bookmarkStart before the first matched run
+        parent.InsertBefore(bookmarkStart, runTexts[firstRunIdx].Run);
+
+        // Insert bookmarkEnd after the last matched run
+        parent.InsertAfter(bookmarkEnd, runTexts[lastRunIdx].Run);
+
+        return true;
+    }
+
+    private static void SetRunText(Run run, string text)
+    {
+        var existing = run.Elements<Text>().ToList();
+        foreach (var t in existing) t.Remove();
+        run.AppendChild(new Text(text) { Space = SpaceProcessingModeValues.Preserve });
     }
 
     private string AddHyperlink(OpenXmlElement parent, string parentPath, int? index, Dictionary<string, string> properties)
