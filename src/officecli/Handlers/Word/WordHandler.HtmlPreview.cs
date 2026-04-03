@@ -325,7 +325,7 @@ public partial class WordHandler
       if(ch>maxBodyH-fh+2)again=true;
     });
     if(again)setTimeout(paginate,0);
-    else{setTimeout(positionFootnotes,0);setTimeout(applyPageFilter,0);setTimeout(scalePages,0);}
+    else{setTimeout(positionFootnotes,0);setTimeout(applyPageFilter,0);setTimeout(function(){scalePages(false);},0);}
   }
   function positionFootnotes(){
     document.querySelectorAll('.page').forEach(function(page){
@@ -355,9 +355,12 @@ public partial class WordHandler
   setTimeout(paginate,100);
 ");
         // Responsive scaling: shrink pages to fit viewport (like PPT's scaleSlides)
-        sb.AppendLine(@"  function scalePages(){
+        sb.AppendLine(@"  function scalePages(animate){
     var bs=getComputedStyle(document.body);
     var availW=document.body.clientWidth-parseFloat(bs.paddingLeft)-parseFloat(bs.paddingRight);
+    if(!animate){
+      document.querySelectorAll('.page-wrapper,.page').forEach(function(el){el.style.transition='none';});
+    }
     document.querySelectorAll('.page-wrapper').forEach(function(wrapper){
       var page=wrapper.querySelector('.page');
       if(!page||page.style.display==='none')return;
@@ -368,11 +371,15 @@ public partial class WordHandler
       wrapper.style.height=(pageH*s)+'px';
       wrapper.style.width=(pageW*s)+'px';
     });
+    if(!animate){
+      document.body.offsetHeight;
+      document.querySelectorAll('.page-wrapper,.page').forEach(function(el){el.style.transition='';});
+    }
   }
   var _resizeTimer;
   window.addEventListener('resize',function(){
     clearTimeout(_resizeTimer);
-    _resizeTimer=setTimeout(scalePages,100);
+    _resizeTimer=setTimeout(function(){scalePages(true);},100);
   });");
         // Pass requested pages to JS for post-pagination filtering
         if (requestedPages != null && requestedPages.Count > 0)
