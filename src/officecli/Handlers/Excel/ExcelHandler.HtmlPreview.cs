@@ -1037,12 +1037,13 @@ public partial class ExcelHandler
             border-bottom: 3px solid var(--tab-color);
             font-weight: 600;
         }
-        .sheet-slider { flex: 1; position: relative; overflow: hidden; }
-        .sheet-content { background: #fff; display: none; }
-        .sheet-content.active { display: block; }
+        .sheet-slider { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+        .sheet-content { background: #fff; display: none; flex: 1; min-height: 0; }
+        .sheet-content.active { display: flex; flex-direction: column; }
         .table-wrapper {
+            flex: 1;
             overflow: auto;
-            max-height: calc(100vh - 90px);
+            min-height: 0;
             background: #fff;
         }
         table {
@@ -1119,9 +1120,9 @@ public partial class ExcelHandler
         /* Print styles */
         @media print {
             .file-title, .sheet-tabs { display: none !important; }
-            .table-wrapper { max-height: none !important; overflow: visible !important; }
+            .table-wrapper { max-height: none !important; overflow: visible !important; flex: none !important; }
             body { background: #fff !important; min-height: auto !important; }
-            .sheet-content { display: block !important; }
+            .sheet-content { display: block !important; flex: none !important; }
             td { max-width: none !important; white-space: normal !important; overflow: visible !important; }
         }
         """;
