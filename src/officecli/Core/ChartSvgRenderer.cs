@@ -331,11 +331,20 @@ internal class ChartSvgRenderer
                 cumulative[s, c] = stacked ? runningSum : val;
             }
         }
+        var allAreaVals = series.SelectMany(s => s.values).DefaultIfEmpty(0).ToArray();
         var maxVal = 0.0;
+        var minVal = 0.0;
         if (stacked) { for (int c = 0; c < catCount; c++) maxVal = Math.Max(maxVal, cumulative[series.Count - 1, c]); }
-        else maxVal = series.SelectMany(s => s.values).DefaultIfEmpty(0).Max();
-        if (maxVal <= 0) maxVal = 1;
-        var (niceMax, tickInterval, tickCount) = ComputeNiceAxis(maxVal);
+        else { maxVal = allAreaVals.Max(); minVal = Math.Min(0.0, allAreaVals.Min()); }
+        if (maxVal <= minVal) maxVal = minVal + 1;
+        var (niceMax, tickInterval, tickCount) = ComputeNiceAxis(Math.Abs(maxVal) > Math.Abs(minVal) ? maxVal : -minVal);
+        // For non-stacked charts with negative values, expand the axis to cover minVal
+        var niceMin = minVal < 0 ? -ComputeNiceAxis(-minVal).niceMax : 0.0;
+        var axisRange = niceMax - niceMin;
+
+        // Helper: map a data value to a y-coordinate within [oy, oy+ph]
+        double DataToY(double v) => oy + ph - (v - niceMin) / axisRange * ph;
+        double ZeroY() => DataToY(0.0);
 
         for (int t = 1; t <= tickCount; t++)
         {
@@ -364,6 +373,7 @@ internal class ChartSvgRenderer
         }
         else
         {
+            var baseY = ZeroY();
             var renderOrder = Enumerable.Range(0, series.Count).OrderByDescending(s => series[s].values.DefaultIfEmpty(0).Max()).ToList();
             foreach (var s in renderOrder)
             {
@@ -372,12 +382,12 @@ internal class ChartSvgRenderer
                 {
                     var px = ox + (catCount > 1 ? (double)pw * c / (catCount - 1) : pw / 2.0);
                     var val = c < series[s].values.Length ? series[s].values[c] : 0;
-                    topPoints.Add($"{px:0.#},{oy + ph - (val / niceMax) * ph:0.#}");
+                    topPoints.Add($"{px:0.#},{DataToY(val):0.#}");
                 }
                 var firstX = ox + (catCount > 1 ? 0 : pw / 2.0);
                 var lastIdx = Math.Min(series[s].values.Length - 1, catCount - 1);
                 var lastX = ox + (catCount > 1 ? (double)pw * lastIdx / (catCount - 1) : pw / 2.0);
-                sb.AppendLine($"        <polygon points=\"{firstX:0.#},{oy + ph} {string.Join(" ", topPoints)} {lastX:0.#},{oy + ph}\" fill=\"{colors[s % colors.Count]}\" opacity=\"0.85\"/>");
+                sb.AppendLine($"        <polygon points=\"{firstX:0.#},{baseY:0.#} {string.Join(" ", topPoints)} {lastX:0.#},{baseY:0.#}\" fill=\"{colors[s % colors.Count]}\" opacity=\"0.85\"/>");
             }
         }
         for (int c = 0; c < catCount; c++)
@@ -774,7 +784,10 @@ internal class ChartSvgRenderer
     public static (double niceMax, double tickStep, int nTicks) ComputeNiceAxis(double maxVal)
     {
         if (maxVal <= 0) maxVal = 1;
+        // Guard against subnormal/denormal values where Log10 returns -Infinity
+        if (!double.IsFinite(maxVal) || maxVal < 1e-10) maxVal = 1;
         var mag = Math.Pow(10, Math.Floor(Math.Log10(maxVal)));
+        if (!double.IsFinite(mag) || mag == 0) mag = 1;
         var res = maxVal / mag;
         var tickStep = res <= 1.5 ? 0.2 * mag : res <= 4 ? 0.5 * mag : res <= 8 ? 1.0 * mag : 2.0 * mag;
         var niceMax = Math.Ceiling(maxVal / tickStep) * tickStep;
