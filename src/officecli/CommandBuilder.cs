@@ -371,6 +371,18 @@ static partial class CommandBuilder
         }
     }
 
+    private static Dictionary<string, string> ParsePropsArray(string[]? props)
+    {
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var prop in props ?? Array.Empty<string>())
+        {
+            var eqIdx = prop.IndexOf('=');
+            if (eqIdx > 0)
+                dict[prop[..eqIdx]] = prop[(eqIdx + 1)..];
+        }
+        return dict;
+    }
+
     internal static void PrintBatchResults(List<BatchResult> results, bool json, int totalCount = 0, TextWriter? output = null)
     {
         var @out = output ?? Console.Out;

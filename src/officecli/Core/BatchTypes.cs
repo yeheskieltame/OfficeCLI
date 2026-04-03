@@ -157,7 +157,7 @@ public class BatchItem
         if (Xml != null) req.Args["xml"] = Xml;
 
         if (Props != null)
-            req.Props = Props.Select(kv => $"{kv.Key}={kv.Value}").ToArray();
+            req.Props = Props;
 
         return req;
     }

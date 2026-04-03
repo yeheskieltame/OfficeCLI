@@ -107,7 +107,7 @@ static partial class CommandBuilder
                     req.Args["parent"] = parentPath;
                     req.Args["type"] = type!;
                     if (index.HasValue) req.Args["index"] = index.Value.ToString();
-                    req.Props = props;
+                    req.Props = ParsePropsArray(props);
                 }, json) is {} rc) return rc != 0 ? rc : (hadWarnings ? 2 : 0);
 
                 var properties = new Dictionary<string, string>();

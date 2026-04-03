@@ -717,7 +717,7 @@ public class ResidentRequest
 {
     public string Command { get; set; } = "";
     public Dictionary<string, string> Args { get; set; } = new();
-    public string[]? Props { get; set; }
+    public Dictionary<string, string>? Props { get; set; }
     public bool Json { get; set; }
 
     public string GetArg(string key, string defaultValue = "")
@@ -746,14 +746,7 @@ public class ResidentRequest
 
     public Dictionary<string, string> GetProps()
     {
-        var properties = new Dictionary<string, string>();
-        foreach (var prop in Props ?? Array.Empty<string>())
-        {
-            var eqIdx = prop.IndexOf('=');
-            if (eqIdx > 0)
-                properties[prop[..eqIdx]] = prop[(eqIdx + 1)..];
-        }
-        return properties;
+        return Props ?? new Dictionary<string, string>();
     }
 }
 

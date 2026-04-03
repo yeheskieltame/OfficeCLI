@@ -68,7 +68,7 @@ static partial class CommandBuilder
             {
                 req.Command = "set";
                 req.Args["path"] = path;
-                req.Props = props;
+                req.Props = ParsePropsArray(props);
             }, json) is {} rc) return rc;
 
             var properties = new Dictionary<string, string>();
