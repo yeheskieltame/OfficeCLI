@@ -188,16 +188,27 @@ officecli remove <file> '/body/p[4]'
 
 ### batch — multiple operations in one save cycle
 
+Stops on first error by default. Use `--force` to continue past errors.
+
 ```bash
+# Via stdin
 echo '[
   {"command":"set","path":"/Sheet1/A1","props":{"value":"Name","bold":"true"}},
   {"command":"set","path":"/Sheet1/B1","props":{"value":"Score","bold":"true"}}
 ]' | officecli batch data.xlsx --json
+
+# Via --commands (inline, no stdin needed)
+officecli batch data.xlsx --commands '[{"op":"set","path":"/Sheet1/A1","props":{"value":"Done"}}]' --json
+
+# Via --input (file)
+officecli batch data.xlsx --input updates.json --force --json
 ```
 
 Batch supports: `add`, `set`, `get`, `query`, `remove`, `move`, `view`, `raw`, `raw-set`, `validate`.
 
-Batch fields: `command`, `path`, `parent`, `type`, `from`, `to`, `index`, `props` (dict), `selector`, `mode`, `depth`, `part`, `xpath`, `action`, `xml`.
+Batch fields: `command` (or `op`), `path`, `parent`, `type`, `from`, `to`, `index`, `props` (dict), `selector`, `mode`, `depth`, `part`, `xpath`, `action`, `xml`.
+
+JSON output is wrapped in an envelope: `{"results": [...], "summary": {"total", "executed", "succeeded", "failed", "skipped"}}`. On error, each failed result includes the original batch item for debugging. Large outputs automatically spill to a temp file.
 
 ---
 

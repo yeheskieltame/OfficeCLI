@@ -230,10 +230,16 @@ officecli set report.docx /body/p[1]/r[1] --prop bold=true
 officecli set report.docx /body/p[2]/r[1] --prop color=FF0000
 officecli close report.docx
 
-# Batch mode — atomic multi-command execution
+# Batch mode — atomic multi-command execution (stops on first error by default)
 echo '[{"command":"set","path":"/slide[1]/shape[1]","props":{"text":"Hello"}},
       {"command":"set","path":"/slide[1]/shape[2]","props":{"fill":"FF0000"}}]' \
-  | officecli batch deck.pptx --stop-on-error
+  | officecli batch deck.pptx --json
+
+# Inline batch with --commands (no stdin needed)
+officecli batch deck.pptx --commands '[{"op":"set","path":"/slide[1]/shape[1]","props":{"text":"Hi"}}]'
+
+# Use --force to continue past errors
+officecli batch deck.pptx --input updates.json --force --json
 ```
 
 ### Three-Layer Architecture
@@ -438,7 +444,7 @@ OFFICECLI_SKIP_UPDATE=1 officecli ...          # Skip check for one invocation (
 | [`move`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-move) | Move element (`--to <parent> --index N`) |
 | [`swap`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-swap) | Swap two elements |
 | [`validate`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-validate) | Validate against OpenXML schema |
-| [`batch`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-batch) | Multiple operations in one open/save cycle (JSON on stdin or `--input`) |
+| [`batch`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-batch) | Multiple operations in one open/save cycle (stdin, `--input`, or `--commands`; stops on first error, `--force` to continue) |
 | [`merge`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-merge) | Template merge — replace `{{key}}` placeholders with JSON data |
 | [`watch`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-watch) | Live HTML preview in browser with auto-refresh |
 | [`mcp`](https://github.com/iOfficeAI/OfficeCLI/wiki/command-mcp) | Start MCP server for AI tool integration |
