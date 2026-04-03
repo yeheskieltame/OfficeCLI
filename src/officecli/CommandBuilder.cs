@@ -264,7 +264,9 @@ static partial class CommandBuilder
             }
             case "set":
             {
-                var path = item.Path ?? "/";
+                if (string.IsNullOrEmpty(item.Path))
+                    throw new ArgumentException("'set' command requires 'path' field. Example: {\"command\": \"set\", \"path\": \"/slide[1]\", \"props\": {\"bold\": \"true\"}}");
+                var path = item.Path;
                 var unsupported = handler.Set(path, props);
                 var applied = props.Where(kv => !unsupported.Contains(kv.Key)).ToList();
                 var parts = new List<string>();
@@ -276,7 +278,11 @@ static partial class CommandBuilder
             }
             case "add":
             {
-                var parentPath = item.Parent ?? item.Path ?? "/";
+                var parentPath = item.Parent ?? item.Path;
+                if (string.IsNullOrEmpty(parentPath))
+                    throw new ArgumentException("'add' command requires 'parent' field. Example: {\"command\": \"add\", \"parent\": \"/slide[1]\", \"type\": \"shape\", \"props\": {\"text\": \"Hello\"}}");
+                if (string.IsNullOrEmpty(item.Type) && string.IsNullOrEmpty(item.From))
+                    throw new ArgumentException("'add' command requires 'type' or 'from' field. Example: {\"command\": \"add\", \"parent\": \"/\", \"type\": \"slide\"}");
                 if (!string.IsNullOrEmpty(item.From))
                 {
                     var resultPath = handler.CopyFrom(item.From, parentPath, item.Index);
@@ -365,8 +371,9 @@ static partial class CommandBuilder
         }
     }
 
-    internal static void PrintBatchResults(List<BatchResult> results, bool json, int totalCount = 0)
+    internal static void PrintBatchResults(List<BatchResult> results, bool json, int totalCount = 0, TextWriter? output = null)
     {
+        var @out = output ?? Console.Out;
         if (totalCount == 0) totalCount = results.Count;
 
         if (json)
@@ -394,7 +401,7 @@ static partial class CommandBuilder
             var fullBytes = ms.ToArray();
             if (fullBytes.Length <= 8192)
             {
-                Console.WriteLine(System.Text.Encoding.UTF8.GetString(fullBytes));
+                @out.WriteLine(System.Text.Encoding.UTF8.GetString(fullBytes));
             }
             else
             {
@@ -402,7 +409,7 @@ static partial class CommandBuilder
                 var tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"officecli_batch_{Guid.NewGuid():N}.json");
                 System.IO.File.WriteAllBytes(tempPath, fullBytes);
 
-                // Write slim envelope to console
+                // Write slim envelope
                 using var slimMs = new System.IO.MemoryStream();
                 using (var slimWriter = new System.Text.Json.Utf8JsonWriter(slimMs))
                 {
@@ -436,7 +443,7 @@ static partial class CommandBuilder
                     slimWriter.WriteEndObject();
                     slimWriter.WriteEndObject();
                 }
-                Console.WriteLine(System.Text.Encoding.UTF8.GetString(slimMs.ToArray()));
+                @out.WriteLine(System.Text.Encoding.UTF8.GetString(slimMs.ToArray()));
             }
         }
         else
@@ -448,19 +455,19 @@ static partial class CommandBuilder
                 if (r.Success)
                 {
                     if (!string.IsNullOrEmpty(r.Output))
-                        Console.WriteLine($"{prefix}{r.Output}");
+                        @out.WriteLine($"{prefix}{r.Output}");
                     else
-                        Console.WriteLine($"{prefix}OK");
+                        @out.WriteLine($"{prefix}OK");
                 }
                 else
                 {
-                    Console.Error.WriteLine($"{prefix}ERROR: {r.Error}");
+                    @out.WriteLine($"{prefix}ERROR: {r.Error}");
                 }
             }
 
             var succeeded = results.Count(r => r.Success);
             var failed = results.Count - succeeded;
-            Console.WriteLine($"\nBatch complete: {succeeded} succeeded, {failed} failed, {results.Count} total");
+            @out.WriteLine($"\nBatch complete: {succeeded} succeeded, {failed} failed, {results.Count} total");
         }
     }
 

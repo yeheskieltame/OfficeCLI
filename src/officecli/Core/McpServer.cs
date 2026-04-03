@@ -278,12 +278,8 @@ public static class McpServer
                         if (stopOnError) break;
                     }
                 }
-                // Use PrintBatchResults to get consistent output (envelope + spill-to-file)
-                var origOut = Console.Out;
                 var sw = new System.IO.StringWriter();
-                Console.SetOut(sw);
-                try { CommandBuilder.PrintBatchResults(results, json: true, totalCount: items.Count); }
-                finally { Console.SetOut(origOut); }
+                CommandBuilder.PrintBatchResults(results, json: true, totalCount: items.Count, output: sw);
                 return sw.ToString().Trim();
             }
             case "raw":
