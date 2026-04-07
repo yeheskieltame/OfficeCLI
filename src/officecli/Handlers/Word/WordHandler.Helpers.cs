@@ -1006,6 +1006,8 @@ public partial class WordHandler
             throw new ArgumentException("after=\"find:...\" / before=\"find:...\" requires a paragraph parent path (e.g. /body/p[1]), not a section-level path like /body.");
 
         // Support regex=true prop as alternative to r"..." prefix
+        // CONSISTENCY(find-regex): mirror of WordHandler.Set.cs:60-61. grep
+        // "CONSISTENCY(find-regex)" for every project-wide call site.
         if (properties.TryGetValue("regex", out var regexFlag) && ParseHelpers.IsTruthySafe(regexFlag) && !findValue.StartsWith("r\"") && !findValue.StartsWith("r'"))
             findValue = $"r\"{findValue}\"";
 

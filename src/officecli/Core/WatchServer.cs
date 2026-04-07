@@ -1,5 +1,9 @@
 // Copyright 2025 OfficeCli (officecli.ai)
 // SPDX-License-Identifier: Apache-2.0
+//
+// CONSISTENCY(watch-isolation): 本文件不引用 OfficeCli.Handlers,不打开文件,不写盘。
+// 见 CLAUDE.md "Watch Server Rules"。要放宽这条红线,
+// grep "CONSISTENCY(watch-isolation)" 找全 watch 子系统所有文件项目级一起评审。
 
 using System.Net;
 using System.Net.Sockets;
@@ -31,8 +35,26 @@ public class WatchServer : IDisposable
     // Current selection — paths of elements selected in any connected browser.
     // Single shared list (last-write-wins): all browsers viewing the same file see
     // the same selection. CLI reads this via the named pipe "get-selection" command.
+    //
+    // CONSISTENCY(path-stability): selection 和 mark 共享同一套裸位置寻址契约,
+    // 没有指纹/漂移检测。要升级到稳定 ID,grep "CONSISTENCY(path-stability)"
+    // 找全所有 deferred 站点项目级一起改。见 CLAUDE.md "Design Principles"。
     private List<string> _currentSelection = new();
     private readonly object _selectionLock = new();
+
+    // Current marks — advisory annotations attached to document paths. Live in
+    // memory only. Server never opens the document and never inspects DOM —
+    // marks are pure metadata; the browser computes match positions client-side.
+    //
+    // CONSISTENCY(path-stability): 元素删除/位置漂移的处理刻意和 selection 一致 ——
+    // 裸位置寻址,无指纹,无漂移检测。stale 仅在 path 解析失败或 find 不命中时由
+    // 客户端报告设置。见 CLAUDE.md "Design Principles" + "Watch Server Rules"。
+    // 要修复成稳定 ID 路径,grep "CONSISTENCY(path-stability)" 找全所有 deferred 站点
+    // (selection / mark / 未来其它 path 消费者)项目级一起改,不要在 mark 单点改。
+    private readonly List<WatchMark> _currentMarks = new();
+    private readonly object _marksLock = new();
+    private int _marksVersion = 0;
+    private int _nextMarkId = 1;
 
     private const string WaitingHtml = """
         <html><head><meta charset="utf-8"><title>Watching...</title>
@@ -71,16 +93,253 @@ public class WatchServer : IDisposable
                     body: JSON.stringify({ paths: paths })
                 }).catch(function() {});
             }
-            // Inject selection highlight CSS
+            // Inject selection + mark highlight CSS
             (function() {
                 var style = document.createElement('style');
                 style.textContent =
                     '.officecli-selected{outline:2px solid #2196f3 !important;' +
                     'outline-offset:2px;' +
                     'box-shadow:0 0 12px rgba(33,150,243,0.6) !important;' +
-                    'z-index:1000;}';
+                    'z-index:1000;}' +
+                    '.officecli-mark{background:#ffeb3b;border-radius:2px;padding:0 1px;}' +
+                    '.officecli-mark-block{outline:2px dashed #ffc107;outline-offset:2px;}' +
+                    '.officecli-mark-stale{background:#e0e0e0 !important;opacity:0.55;text-decoration:line-through;}';
                 document.head.appendChild(style);
             })();
+            // ===== Marks =====
+            // Server is the source of truth. The browser mirrors _marks via SSE
+            // 'mark-update' broadcasts and re-applies them after every DOM swap.
+            //
+            // CONSISTENCY(find-regex): literal vs regex detection uses the r"..." /
+            // r'...' raw-string prefix rule from WordHandler.Set.cs:60-61. If that
+            // protocol changes, grep "CONSISTENCY(find-regex)" and update every site
+            // (set handler, mark CLI, server, this JS) together. Do NOT diverge here.
+            //
+            // CONSISTENCY(path-stability): when a mark's path no longer resolves or
+            // its find no longer matches, we flip a visual-only stale class and
+            // move on — same naive positional model as selection. No fingerprint,
+            // no drift detection. grep "CONSISTENCY(path-stability)" for deferred
+            // sites. See CLAUDE.md Watch Server Rules.
+            var _marks = [];
+            function _isRegexFind(find) {
+                if (!find || find.length < 3) return false;
+                return (find.charAt(0) === 'r' &&
+                        (find.charAt(1) === '"' || find.charAt(1) === "'") &&
+                        find.charAt(find.length - 1) === find.charAt(1));
+            }
+            function _extractRegexPattern(find) {
+                // r"..." or r'...' — strip the 2-char prefix and 1-char suffix
+                return find.substring(2, find.length - 1);
+            }
+            function _normalizeNfc(s) {
+                try { return s.normalize('NFC'); } catch (e) { return s; }
+            }
+            function _markTitle(m) {
+                var find = m.find || '';
+                var expect = m.expect || '';
+                var note = m.note || '';
+                if (expect) {
+                    var head = find ? (find + ' → ' + expect) : ('→ ' + expect);
+                    return note ? (head + '\n' + note) : head;
+                }
+                return note;
+            }
+            function _clearMarks() {
+                // Unwrap every existing .officecli-mark span, restoring original text
+                // nodes. Iterate a snapshot because replaceWith mutates the NodeList.
+                var spans = Array.prototype.slice.call(
+                    document.querySelectorAll('.officecli-mark'));
+                for (var i = 0; i < spans.length; i++) {
+                    var sp = spans[i];
+                    var parent = sp.parentNode;
+                    if (!parent) continue;
+                    while (sp.firstChild) parent.insertBefore(sp.firstChild, sp);
+                    parent.removeChild(sp);
+                    // Merge adjacent text nodes so future indexOf calls span the whole run
+                    parent.normalize();
+                }
+                // Drop block-mark outlines and any stale inline overrides
+                var blocks = Array.prototype.slice.call(
+                    document.querySelectorAll('.officecli-mark-block'));
+                for (var j = 0; j < blocks.length; j++) {
+                    blocks[j].classList.remove('officecli-mark-block');
+                    blocks[j].classList.remove('officecli-mark-stale');
+                    if (blocks[j].dataset && blocks[j].dataset.officecliMarkBg) {
+                        blocks[j].style.backgroundColor = '';
+                        delete blocks[j].dataset.officecliMarkBg;
+                    }
+                }
+            }
+            // Walk the element's text nodes and return
+            //   { text: concatenated NFC text, map: [ {node, start, end} ... ] }
+            // so we can map absolute char offsets in `text` back to specific text nodes.
+            function _buildTextMap(el) {
+                var walker = document.createTreeWalker(
+                    el, NodeFilter.SHOW_TEXT, null, false);
+                var parts = [];
+                var map = [];
+                var cursor = 0;
+                var n;
+                while ((n = walker.nextNode())) {
+                    var v = _normalizeNfc(n.nodeValue || '');
+                    if (v.length === 0) continue;
+                    parts.push(v);
+                    map.push({ node: n, start: cursor, end: cursor + v.length });
+                    cursor += v.length;
+                }
+                return { text: parts.join(''), map: map };
+            }
+            function _findNodeAt(map, offset) {
+                // Linear scan — element text count is small; binary search unnecessary.
+                for (var i = 0; i < map.length; i++) {
+                    if (offset >= map[i].start && offset < map[i].end) {
+                        return { node: map[i].node, local: offset - map[i].start };
+                    }
+                }
+                // Offset at very end of last node
+                if (map.length > 0 && offset === map[map.length - 1].end) {
+                    var last = map[map.length - 1];
+                    return { node: last.node, local: last.end - last.start };
+                }
+                return null;
+            }
+            function _wrapRange(el, startOff, endOff, map, markId, color, title, stale) {
+                var s = _findNodeAt(map, startOff);
+                var e = _findNodeAt(map, endOff);
+                if (!s || !e) return false;
+                var range = document.createRange();
+                try {
+                    range.setStart(s.node, s.local);
+                    range.setEnd(e.node, e.local);
+                } catch (err) {
+                    return false;
+                }
+                var span = document.createElement('span');
+                span.className = stale ? 'officecli-mark officecli-mark-stale' : 'officecli-mark';
+                span.setAttribute('data-mark-id', markId);
+                if (color) span.style.backgroundColor = color;
+                if (title) span.title = title;
+                try {
+                    range.surroundContents(span);
+                } catch (err) {
+                    // surroundContents throws if the range spans a non-Text boundary.
+                    // Fallback: extract + insert. Loses the "single wrapper" property but
+                    // still applies visual styling to the content (the span wraps a
+                    // DocumentFragment which still carries the class).
+                    try {
+                        var frag = range.extractContents();
+                        span.appendChild(frag);
+                        range.insertNode(span);
+                    } catch (err2) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            function applyMarks() {
+                _clearMarks();
+                if (!_marks || _marks.length === 0) return;
+                for (var mi = 0; mi < _marks.length; mi++) {
+                    var m = _marks[mi];
+                    if (!m || !m.path) continue;
+                    var el;
+                    try {
+                        var sel = '[data-path="' + m.path.replace(/"/g, '\\"') + '"]';
+                        el = document.querySelector(sel);
+                    } catch (e) { el = null; }
+                    if (!el) {
+                        // CONSISTENCY(path-stability): path no longer resolves — skip.
+                        // No drift detection, no fallback lookup. Consistent with selection.
+                        continue;
+                    }
+                    var title = _markTitle(m);
+                    var color = m.color || '';
+                    // No find → the whole element is the mark
+                    if (!m.find) {
+                        el.classList.add('officecli-mark-block');
+                        if (m.stale) el.classList.add('officecli-mark-stale');
+                        if (title) el.title = title;
+                        if (color) {
+                            el.style.backgroundColor = color;
+                            if (!el.dataset) el.dataset = {};
+                            el.dataset.officecliMarkBg = '1';
+                        }
+                        continue;
+                    }
+                    // Find has a value → locate matches and wrap each.
+                    // CONSISTENCY(find-regex): detect r"..." / r'...' prefix the same way
+                    // the C# side does (see WordHandler.Set.cs:60-61 and
+                    // CommandBuilder.Mark.cs). Keep these in sync.
+                    var tm = _buildTextMap(el);
+                    var text = tm.text;
+                    if (text.length === 0) continue;
+                    var hitCount = 0;
+                    if (_isRegexFind(m.find)) {
+                        var patt = _extractRegexPattern(m.find);
+                        var re;
+                        try { re = new RegExp(patt, 'g'); }
+                        catch (rxErr) { continue; }
+                        // Re-read tm after each successful wrap — wrapping mutates
+                        // the DOM, invalidating text node references. Start over
+                        // from the remaining tail text.
+                        var cursor = 0;
+                        while (true) {
+                            re.lastIndex = cursor;
+                            var mr = re.exec(text);
+                            if (!mr) break;
+                            var mStart = mr.index;
+                            var mEnd = mr.index + mr[0].length;
+                            if (mEnd === mStart) {
+                                // Zero-width match — advance to avoid infinite loop
+                                cursor = mEnd + 1;
+                                if (cursor > text.length) break;
+                                continue;
+                            }
+                            var freshMap = _buildTextMap(el);
+                            if (_wrapRange(el, mStart, mEnd, freshMap.map,
+                                           m.id, color, title, m.stale)) {
+                                hitCount++;
+                            }
+                            // After a wrap the text content is unchanged (we only
+                            // insert a span, the text characters stay in place), so
+                            // we can keep matching in the same `text` string.
+                            cursor = mEnd;
+                            if (hitCount > 500) break; // safety cap
+                        }
+                    } else {
+                        var needle = _normalizeNfc(m.find);
+                        if (needle.length === 0) continue;
+                        var from = 0;
+                        while (true) {
+                            var idx = text.indexOf(needle, from);
+                            if (idx < 0) break;
+                            var fm = _buildTextMap(el);
+                            if (_wrapRange(el, idx, idx + needle.length, fm.map,
+                                           m.id, color, title, m.stale)) {
+                                hitCount++;
+                            }
+                            from = idx + needle.length;
+                            if (hitCount > 500) break;
+                        }
+                    }
+                    if (hitCount === 0) {
+                        // find supplied but nothing matched — visually mark the block
+                        // as stale so the user can see the mark is "orphaned".
+                        el.classList.add('officecli-mark-block');
+                        el.classList.add('officecli-mark-stale');
+                        if (title) el.title = title;
+                    }
+                }
+            }
+            // Unified reapply hook used by every code path that swaps or mutates DOM.
+            function reapplyDecorations() {
+                applySelectionToDom();
+                applyMarks();
+            }
+            window._officecliReapplyDecorations = reapplyDecorations;
+            window._officecliApplyMarks = applyMarks;
+            window._officecliSetMarks = function(arr) { _marks = arr || []; applyMarks(); };
+            window._officecliGetMarks = function() { return _marks; };
             // Click handler — selects the closest element with [data-path].
             // shift/ctrl/cmd toggle multi-select; plain click replaces.
             // Skipped if a rubber-band drag just finished.
@@ -202,13 +461,21 @@ public class WatchServer : IDisposable
                 // Only cancel if cursor truly left the page (relatedTarget == null)
                 if (!e.relatedTarget && _rubber) _cancelRubber();
             });
-            // SSE: receive selection updates from any browser (including ours)
+            // SSE: receive selection and mark updates from the server.
+            // This listener handles the lightweight metadata events; the heavier
+            // DOM-swap events (full / replace / word-patch / ...) are handled by a
+            // second listener registered further down.
             es.addEventListener('update', function(e) {
                 var msg;
                 try { msg = JSON.parse(e.data); } catch (err) { return; }
                 if (msg.action === 'selection-update') {
                     _selection = msg.paths || [];
                     applySelectionToDom();
+                } else if (msg.action === 'mark-update') {
+                    // Monotonic version: clients may CAS on this value to skip
+                    // redundant updates if they missed nothing. We just refresh.
+                    _marks = msg.marks || [];
+                    applyMarks();
                 }
             });
             function scrollToSlide(num) {
@@ -327,6 +594,10 @@ public class WatchServer : IDisposable
                     // Re-paginate (will also re-scale and remove freeze)
                     if (typeof window._wordPaginate === 'function') window._wordPaginate();
                     else { var f=document.getElementById('_sse_freeze'); if(f)f.remove(); }
+                    // Re-apply selection + marks after DOM swap. Pagination is
+                    // scheduled via setTimeout inside _wordPaginate; applyMarks
+                    // walks the current DOM which already has the new content.
+                    reapplyDecorations();
                 });
             }
             // Track version for gap detection
@@ -413,6 +684,8 @@ public class WatchServer : IDisposable
                 _clientVersion = msg.version;
                 // Re-paginate + render new KaTeX/CJK
                 if (typeof window._wordPaginate === 'function') window._wordPaginate();
+                // Re-apply selection + marks after block-level DOM mutations
+                reapplyDecorations();
             }
             es.addEventListener('update', function(e) {
                 var msg = JSON.parse(e.data);
@@ -474,8 +747,8 @@ public class WatchServer : IDisposable
                         if (msg.scrollTo && targetSheetIdx < 0) {
                             window._pendingScrollTo = msg.scrollTo;
                         }
-                        // Re-apply selection after the body swap destroyed previous .officecli-selected
-                        applySelectionToDom();
+                        // Re-apply selection + marks after the body swap destroyed previous decorations
+                        reapplyDecorations();
                     });
                     return;
                 }
@@ -493,7 +766,7 @@ public class WatchServer : IDisposable
                     } else {
                         location.reload();
                     }
-                    applySelectionToDom();
+                    reapplyDecorations();
                 } else if (msg.action === 'remove') {
                     var el = document.querySelector('.slide-container[data-slide="' + slideNum + '"]');
                     if (el) el.remove();
@@ -502,7 +775,7 @@ public class WatchServer : IDisposable
                         c.setAttribute('data-slide', i + 1);
                     });
                     syncThumbs();
-                    applySelectionToDom();
+                    reapplyDecorations();
                 } else if (msg.action === 'add') {
                     var main = document.querySelector('.main');
                     if (main) {
@@ -514,7 +787,7 @@ public class WatchServer : IDisposable
                     }
                     syncThumbs();
                     scrollToSlide(slideNum);
-                    applySelectionToDom();
+                    reapplyDecorations();
                 }
             });
         })();
@@ -658,7 +931,7 @@ public class WatchServer : IDisposable
             // Handle the client on a background task and immediately loop back
             // to accept another connection. This avoids a tiny window where the
             // pipe is not listening between iterations and back-to-back CLI
-            // calls get refused.
+            // calls (e.g. multiple mark adds in a tight test loop) get refused.
             _ = Task.Run(async () =>
             {
                 using (server)
@@ -700,8 +973,38 @@ public class WatchServer : IDisposable
                     // Empty selection → "[]". Never null.
                     string[] snapshot;
                     lock (_selectionLock) { snapshot = _currentSelection.ToArray(); }
-                    var json = JsonSerializer.Serialize(snapshot, WatchSelectionJsonContext.Default.StringArray);
+                    var json = JsonSerializer.Serialize(snapshot, WatchSelectionJsonOptions.StringArrayInfo);
                     await writer.WriteLineAsync(json.AsMemory(), token);
+                }
+                else if (message == "get-marks")
+                {
+                    // Return {"version":N,"marks":[...]} so callers can do CAS-style
+                    // detection. Empty marks → []. Never null.
+                    // Uses Relaxed options so CJK content emits literal chars.
+                    WatchMark[] snapshot;
+                    int version;
+                    lock (_marksLock)
+                    {
+                        snapshot = _currentMarks.ToArray();
+                        version = _marksVersion;
+                    }
+                    var resp = new MarksResponse { Version = version, Marks = snapshot };
+                    var payload = JsonSerializer.Serialize(resp, WatchMarkJsonOptions.MarksResponseInfo);
+                    await writer.WriteLineAsync(payload.AsMemory(), token);
+                }
+                else if (message != null && message.StartsWith("mark ", StringComparison.Ordinal))
+                {
+                    // "mark <json>" — add a mark, return assigned id
+                    var payload = message.Substring(5);
+                    var resp = HandleMarkAdd(payload);
+                    await writer.WriteLineAsync(resp.AsMemory(), token);
+                }
+                else if (message != null && message.StartsWith("unmark ", StringComparison.Ordinal))
+                {
+                    // "unmark <json>" — remove marks by path or all
+                    var payload = message.Substring(7);
+                    var resp = HandleMarkRemove(payload);
+                    await writer.WriteLineAsync(resp.AsMemory(), token);
                 }
                 else if (message != null)
                 {
@@ -743,6 +1046,12 @@ public class WatchServer : IDisposable
 
             _version++;
 
+            // Reconcile all marks against the freshly updated snapshot. Flips
+            // stale flags and refreshes matched_text when the underlying text
+            // changed. CONSISTENCY(path-stability): same naive resolve used on
+            // initial add, no fingerprint.
+            ReconcileAllMarks();
+
             // Word: try block-level diff instead of full refresh
             if (msg.Action == "full" && !string.IsNullOrEmpty(msg.FullHtml)
                 && !string.IsNullOrEmpty(oldHtml) && oldHtml.Contains("data-block=\"1\""))
@@ -772,6 +1081,345 @@ public class WatchServer : IDisposable
             _version++;
             SendSseEvent("full", 0, null, null, _version);
         }
+    }
+
+    // ==================== Marks ====================
+
+    /// <summary>
+    /// Add a new mark. Normalizes find: if regex flag (truthy via the find
+    /// payload's "regex" field would be parsed by the CLI side; the server
+    /// receives the canonical form already wrapped as r"..." or literal).
+    /// However we ALSO accept the bare-find form here so that callers that
+    /// don't pre-wrap still get correct behaviour. The CLI passes either
+    /// the literal or a pre-wrapped r"..." string.
+    /// </summary>
+    internal string HandleMarkAdd(string json)
+    {
+        try
+        {
+            var req = JsonSerializer.Deserialize(json, WatchMarkJsonContext.Default.MarkRequest);
+            if (req == null || string.IsNullOrEmpty(req.Path))
+                return "{\"error\":\"invalid request\"}";
+
+            var mark = new WatchMark
+            {
+                Path = req.Path,
+                Find = req.Find,
+                Color = string.IsNullOrEmpty(req.Color) ? "#ffeb3b" : req.Color,
+                Note = req.Note,
+                Expect = req.Expect,
+                MatchedText = Array.Empty<string>(),
+                Stale = false,
+                CreatedAt = DateTime.UtcNow,
+            };
+
+            string assignedId;
+            WatchMark[] snapshot;
+            string htmlSnapshot;
+            lock (_marksLock)
+            {
+                assignedId = _nextMarkId.ToString();
+                _nextMarkId++;
+                mark.Id = assignedId;
+                // Snapshot _currentHtml under the lock so a concurrent
+                // full-refresh can't race the resolve step.
+                htmlSnapshot = _currentHtml;
+                var resolved = ResolveMark(mark, htmlSnapshot);
+                _currentMarks.Add(resolved);
+                _marksVersion++;
+                snapshot = _currentMarks.ToArray();
+            }
+            _lastActivityTime = DateTime.UtcNow;
+            BroadcastMarkUpdate(snapshot);
+
+            return JsonSerializer.Serialize(
+                new MarkResponse { Id = assignedId },
+                WatchMarkJsonContext.Default.MarkResponse);
+        }
+        catch
+        {
+            return "{\"error\":\"parse failed\"}";
+        }
+    }
+
+    /// <summary>
+    /// Remove marks. UnmarkRequest must have either Path set, or All=true,
+    /// not both. Returns the number of marks removed.
+    /// </summary>
+    internal string HandleMarkRemove(string json)
+    {
+        try
+        {
+            var req = JsonSerializer.Deserialize(json, WatchMarkJsonContext.Default.UnmarkRequest);
+            if (req == null) return "{\"removed\":0}";
+
+            int removed = 0;
+            WatchMark[] snapshot;
+            lock (_marksLock)
+            {
+                if (req.All)
+                {
+                    removed = _currentMarks.Count;
+                    _currentMarks.Clear();
+                }
+                else if (!string.IsNullOrEmpty(req.Path))
+                {
+                    removed = _currentMarks.RemoveAll(m =>
+                        string.Equals(m.Path, req.Path, StringComparison.Ordinal));
+                }
+                if (removed > 0) _marksVersion++;
+                snapshot = _currentMarks.ToArray();
+            }
+            _lastActivityTime = DateTime.UtcNow;
+            if (removed > 0) BroadcastMarkUpdate(snapshot);
+
+            return JsonSerializer.Serialize(
+                new UnmarkResponse { Removed = removed },
+                WatchMarkJsonContext.Default.UnmarkResponse);
+        }
+        catch
+        {
+            return "{\"removed\":0}";
+        }
+    }
+
+    /// <summary>Test-only accessor for current marks snapshot.</summary>
+    internal WatchMark[] GetMarksSnapshot()
+    {
+        lock (_marksLock) { return _currentMarks.ToArray(); }
+    }
+
+    /// <summary>Test-only accessor for the current marks version.</summary>
+    internal int GetMarksVersion()
+    {
+        lock (_marksLock) { return _marksVersion; }
+    }
+
+    /// <summary>
+    /// Test-only hook: install a full HTML snapshot synchronously and trigger
+    /// mark reconciliation. Used by WatchMarkTests to verify ResolveMark without
+    /// racing the pipe's "ack first, process later" ordering.
+    /// </summary>
+    internal void ApplyFullHtmlForTests(string html)
+    {
+        _currentHtml = html ?? "";
+        _version++;
+        ReconcileAllMarks();
+    }
+
+    // -------- Mark resolution (server-side reconcile) --------
+    //
+    // CONSISTENCY(path-stability): resolution uses naive positional
+    // data-path lookup — no fingerprinting, no drift detection. If an
+    // element is later removed or its find target no longer matches,
+    // the mark is flipped to Stale=true with MatchedText=[]. Same
+    // limitations as selection. grep "CONSISTENCY(path-stability)" for
+    // all deferred sites that should move together if we ever switch
+    // to stable IDs. See CLAUDE.md "Watch Server Rules".
+    //
+    // watch-isolation: this code runs pure-regex string-scraping on
+    // the html snapshot already cached in _currentHtml. It does not
+    // open the document, does not depend on OfficeCli.Handlers, and
+    // does not reference any DOM parser. A real HTML parser would be
+    // more correct but would introduce coupling; the MVP trades
+    // precision for isolation and matches the browser-side
+    // applyMarks() fallback behaviour.
+
+    private static readonly System.Text.RegularExpressions.Regex _tagStripRx =
+        new("<[^>]+>", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// Locate the element with the given data-path in the cached HTML snapshot
+    /// and return its inner HTML fragment (start tag + children + end tag).
+    /// Uses bracket-depth counting of sibling tags to find the matching close.
+    /// Returns null if the path is not present.
+    /// </summary>
+    private static string? FindDataPathInHtml(string html, string path)
+    {
+        if (string.IsNullOrEmpty(html) || string.IsNullOrEmpty(path)) return null;
+        // Anchor the search on the data-path attribute. Path may contain [] so
+        // we match it as a literal substring inside quotes.
+        var marker = "data-path=\"" + path + "\"";
+        var idx = html.IndexOf(marker, StringComparison.Ordinal);
+        if (idx < 0) return null;
+        // Walk back to the opening '<' of this element's start tag.
+        var start = html.LastIndexOf('<', idx);
+        if (start < 0) return null;
+        // Find the end of the start tag.
+        var startEnd = html.IndexOf('>', idx);
+        if (startEnd < 0) return null;
+        // Self-closing tag? (extremely unlikely for data-path targets but be safe)
+        if (html[startEnd - 1] == '/')
+            return html.Substring(start, startEnd - start + 1);
+        // Extract the tag name so we can match its close.
+        var tagEnd = start + 1;
+        while (tagEnd < html.Length && !char.IsWhiteSpace(html[tagEnd]) && html[tagEnd] != '>')
+            tagEnd++;
+        var tag = html.Substring(start + 1, tagEnd - start - 1).ToLowerInvariant();
+        var openToken = "<" + tag;
+        var closeToken = "</" + tag;
+        // Count nested open/close to find the matching close tag.
+        var depth = 1;
+        var cursor = startEnd + 1;
+        while (cursor < html.Length && depth > 0)
+        {
+            var nextOpen = html.IndexOf(openToken, cursor, StringComparison.OrdinalIgnoreCase);
+            var nextClose = html.IndexOf(closeToken, cursor, StringComparison.OrdinalIgnoreCase);
+            if (nextClose < 0) return null;
+            if (nextOpen >= 0 && nextOpen < nextClose)
+            {
+                // Ensure the candidate open isn't actually part of a longer tag name
+                var after = nextOpen + openToken.Length;
+                if (after < html.Length && (html[after] == ' ' || html[after] == '>' || html[after] == '\t' || html[after] == '\n'))
+                {
+                    depth++;
+                    cursor = after;
+                    continue;
+                }
+                cursor = nextOpen + openToken.Length;
+                continue;
+            }
+            depth--;
+            cursor = nextClose + closeToken.Length;
+            if (depth == 0)
+            {
+                // Advance past the close tag's '>'
+                var gt = html.IndexOf('>', cursor);
+                if (gt < 0) return null;
+                return html.Substring(start, gt - start + 1);
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Extract plain text content from an HTML fragment: strip all tags, decode
+    /// HTML entities, collapse whitespace minimally, and NFC-normalize. Pure
+    /// regex — no DOM parser dependency.
+    /// </summary>
+    internal static string ExtractTextContent(string htmlFragment)
+    {
+        if (string.IsNullOrEmpty(htmlFragment)) return "";
+        var stripped = _tagStripRx.Replace(htmlFragment, "");
+        var decoded = System.Net.WebUtility.HtmlDecode(stripped);
+        try { return decoded.Normalize(System.Text.NormalizationForm.FormC); }
+        catch { return decoded; }
+    }
+
+    /// <summary>
+    /// Resolve a mark against the current HTML snapshot: populate
+    /// MatchedText and Stale based on whether the path still resolves
+    /// and whether find still matches.
+    ///
+    /// Pure function: returns a new WatchMark, does not mutate the input.
+    /// The caller is responsible for locking _marksLock if it's writing back
+    /// into _currentMarks.
+    /// </summary>
+    internal static WatchMark ResolveMark(WatchMark mark, string currentHtml)
+    {
+        var resolved = new WatchMark
+        {
+            Id = mark.Id,
+            Path = mark.Path,
+            Find = mark.Find,
+            Color = mark.Color,
+            Note = mark.Note,
+            Expect = mark.Expect,
+            CreatedAt = mark.CreatedAt,
+            // Defaults get overwritten below.
+            MatchedText = Array.Empty<string>(),
+            Stale = false,
+        };
+
+        if (string.IsNullOrEmpty(currentHtml))
+        {
+            // No snapshot yet (watch just started, first refresh not arrived) —
+            // treat as "not resolvable yet" but don't flag stale: the CLI may
+            // be adding marks before the first render. Stale stays false.
+            return resolved;
+        }
+
+        var fragment = FindDataPathInHtml(currentHtml, mark.Path);
+        if (fragment == null)
+        {
+            resolved.Stale = true;
+            return resolved;
+        }
+
+        if (string.IsNullOrEmpty(mark.Find))
+        {
+            // Whole-element mark — no text matching needed.
+            return resolved;
+        }
+
+        var text = ExtractTextContent(fragment);
+        var find = mark.Find;
+
+        // CONSISTENCY(find-regex): r"..." / r'...' raw-string prefix detection
+        // matches WordHandler.Set.cs:60-61 and CommandBuilder.Mark.cs. Keep in
+        // sync. grep "CONSISTENCY(find-regex)" for every project-wide site.
+        bool isRegex = find.Length >= 3
+            && find[0] == 'r'
+            && (find[1] == '"' || find[1] == '\'')
+            && find[^1] == find[1];
+
+        if (isRegex)
+        {
+            var pattern = find.Substring(2, find.Length - 3);
+            try
+            {
+                var matches = System.Text.RegularExpressions.Regex.Matches(text, pattern);
+                if (matches.Count == 0)
+                {
+                    resolved.Stale = true;
+                    return resolved;
+                }
+                var list = new string[matches.Count];
+                for (int i = 0; i < matches.Count; i++) list[i] = matches[i].Value;
+                resolved.MatchedText = list;
+                return resolved;
+            }
+            catch
+            {
+                // Bad regex → treat as no match, stale.
+                resolved.Stale = true;
+                return resolved;
+            }
+        }
+        else
+        {
+            var needle = find;
+            try { needle = needle.Normalize(System.Text.NormalizationForm.FormC); } catch { }
+            if (text.IndexOf(needle, StringComparison.Ordinal) < 0)
+            {
+                resolved.Stale = true;
+                return resolved;
+            }
+            resolved.MatchedText = new[] { needle };
+            return resolved;
+        }
+    }
+
+    /// <summary>
+    /// Re-run ResolveMark on every mark in the current list. Called when the
+    /// cached HTML snapshot changes (document reload / full refresh). Updates
+    /// each mark's MatchedText and Stale in place and bumps _marksVersion so
+    /// clients that missed the change can detect it.
+    /// </summary>
+    private void ReconcileAllMarks()
+    {
+        WatchMark[] snapshot;
+        lock (_marksLock)
+        {
+            if (_currentMarks.Count == 0) return;
+            for (int i = 0; i < _currentMarks.Count; i++)
+            {
+                _currentMarks[i] = ResolveMark(_currentMarks[i], _currentHtml);
+            }
+            _marksVersion++;
+            snapshot = _currentMarks.ToArray();
+        }
+        BroadcastMarkUpdate(snapshot);
     }
 
     /// <summary>Replace a single slide fragment in the full HTML by data-slide number.</summary>
@@ -1212,6 +1860,28 @@ public class WatchServer : IDisposable
         BroadcastSse(sb.ToString());
     }
 
+    /// <summary>
+    /// Wrap a WatchMark[] snapshot in a "mark-update" SSE envelope. Called
+    /// after every mark add/remove, and during initial SSE client handshake.
+    /// The version field is a monotonically-increasing counter that clients
+    /// can use for CAS-style update detection.
+    ///
+    /// Uses the Relaxed encoder so CJK find/note/expect bytes flow through
+    /// as literal characters instead of \uXXXX escapes.
+    /// </summary>
+    private static string BuildMarkUpdateJson(WatchMark[] marks, int version)
+    {
+        var marksJson = JsonSerializer.Serialize(marks, WatchMarkJsonOptions.WatchMarkArrayInfo);
+        return $"{{\"action\":\"mark-update\",\"version\":{version},\"marks\":{marksJson}}}";
+    }
+
+    private void BroadcastMarkUpdate(WatchMark[] marks)
+    {
+        int version;
+        lock (_marksLock) { version = _marksVersion; }
+        BroadcastSse(BuildMarkUpdateJson(marks, version));
+    }
+
     private async Task HandleSseAsync(NetworkStream stream, CancellationToken token)
     {
         var header = Encoding.UTF8.GetBytes(
@@ -1241,6 +1911,20 @@ public class WatchServer : IDisposable
             sb.Append("]}");
             var initEvt = Encoding.UTF8.GetBytes($"event: update\ndata: {sb}\n\n");
             await stream.WriteAsync(initEvt, token);
+
+            // Also dump the current marks snapshot so a freshly connected browser
+            // immediately sees any marks the CLI has already added. Mirrors the
+            // selection init dump pattern above.
+            WatchMark[] markSnapshot;
+            int markVersion;
+            lock (_marksLock)
+            {
+                markSnapshot = _currentMarks.ToArray();
+                markVersion = _marksVersion;
+            }
+            var markJson = BuildMarkUpdateJson(markSnapshot, markVersion);
+            var markInitEvt = Encoding.UTF8.GetBytes($"event: update\ndata: {markJson}\n\n");
+            await stream.WriteAsync(markInitEvt, token);
         }
         catch { }
 

@@ -1,5 +1,9 @@
 // Copyright 2025 OfficeCli (officecli.ai)
 // SPDX-License-Identifier: Apache-2.0
+//
+// CONSISTENCY(watch-isolation): 本文件不引用 OfficeCli.Handlers,不打开文件,不写盘。
+// 见 CLAUDE.md "Watch Server Rules"。要放宽这条红线,
+// grep "CONSISTENCY(watch-isolation)" 找全 watch 子系统所有文件项目级一起评审。
 
 using System.IO.Pipes;
 using System.Text;
@@ -82,6 +86,131 @@ public static class WatchNotifier
         catch
         {
             return null; // no watch running, or timed out
+        }
+    }
+
+    // ==================== Marks ====================
+
+    /// <summary>
+    /// Add a mark to the running watch process. Returns the assigned id, or
+    /// null if no watch is running. Throws if the request payload is rejected.
+    ///
+    /// The find string should be passed as-is. The CLI must wrap with r"..."
+    /// when regex=true (mirroring WordHandler.Set's vocabulary).
+    /// </summary>
+    public static string? AddMark(string filePath, MarkRequest request)
+    {
+        try
+        {
+            string? result = null;
+            RunWithTimeout(() =>
+            {
+                var pipeName = WatchServer.GetWatchPipeName(filePath);
+                using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
+                client.Connect(200);
+
+                var noBom = new UTF8Encoding(false);
+                using var writer = new StreamWriter(client, noBom, leaveOpen: true) { AutoFlush = true };
+                var payload = JsonSerializer.Serialize(request, WatchMarkJsonContext.Default.MarkRequest);
+                writer.WriteLine("mark " + payload);
+                writer.Flush();
+
+                using var reader = new StreamReader(client, noBom, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+                var responseLine = reader.ReadLine();
+                if (string.IsNullOrEmpty(responseLine)) { result = null; return; }
+                var resp = JsonSerializer.Deserialize(responseLine, WatchMarkJsonContext.Default.MarkResponse);
+                result = resp?.Id;
+            }, PipeTimeout);
+            return result;
+        }
+        catch
+        {
+            return null; // no watch running, or error
+        }
+    }
+
+    /// <summary>
+    /// Remove marks from the running watch process. Returns count removed,
+    /// or null if no watch is running.
+    /// </summary>
+    public static int? RemoveMarks(string filePath, UnmarkRequest request)
+    {
+        try
+        {
+            int? result = null;
+            RunWithTimeout(() =>
+            {
+                var pipeName = WatchServer.GetWatchPipeName(filePath);
+                using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
+                client.Connect(200);
+
+                var noBom = new UTF8Encoding(false);
+                using var writer = new StreamWriter(client, noBom, leaveOpen: true) { AutoFlush = true };
+                var payload = JsonSerializer.Serialize(request, WatchMarkJsonContext.Default.UnmarkRequest);
+                writer.WriteLine("unmark " + payload);
+                writer.Flush();
+
+                using var reader = new StreamReader(client, noBom, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+                var responseLine = reader.ReadLine();
+                if (string.IsNullOrEmpty(responseLine)) { result = 0; return; }
+                var resp = JsonSerializer.Deserialize(responseLine, WatchMarkJsonContext.Default.UnmarkResponse);
+                result = resp?.Removed ?? 0;
+            }, PipeTimeout);
+            return result;
+        }
+        catch
+        {
+            return null; // no watch running
+        }
+    }
+
+    /// <summary>
+    /// Query all marks currently held by the watch process. Returns null if
+    /// no watch is running, an empty array if the watch is running but no
+    /// marks have been added, or the full list of marks otherwise.
+    ///
+    /// Thin wrapper over <see cref="QueryMarksFull"/> for callers that only
+    /// care about the array. Use QueryMarksFull if you need the version.
+    /// </summary>
+    public static WatchMark[]? QueryMarks(string filePath)
+    {
+        var full = QueryMarksFull(filePath);
+        return full?.Marks;
+    }
+
+    /// <summary>
+    /// Query marks + monotonic version. Returns null if no watch is running.
+    /// The version field lets callers CAS-style detect whether marks changed
+    /// between two reads; the CLI's get-marks --json output surfaces this
+    /// directly so AI consumers can cache without re-parsing.
+    /// </summary>
+    public static MarksResponse? QueryMarksFull(string filePath)
+    {
+        try
+        {
+            MarksResponse? result = null;
+            RunWithTimeout(() =>
+            {
+                var pipeName = WatchServer.GetWatchPipeName(filePath);
+                using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
+                client.Connect(200);
+
+                var noBom = new UTF8Encoding(false);
+                using var writer = new StreamWriter(client, noBom, leaveOpen: true) { AutoFlush = true };
+                writer.WriteLine("get-marks");
+                writer.Flush();
+
+                using var reader = new StreamReader(client, noBom, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+                var json = reader.ReadLine();
+                if (json == null) { result = new MarksResponse(); return; }
+                result = JsonSerializer.Deserialize(json, WatchMarkJsonContext.Default.MarksResponse)
+                         ?? new MarksResponse();
+            }, PipeTimeout);
+            return result;
+        }
+        catch
+        {
+            return null; // no watch running
         }
     }
 
@@ -219,3 +348,21 @@ public class SelectionRequest
 [System.Text.Json.Serialization.JsonSerializable(typeof(SelectionRequest))]
 [System.Text.Json.Serialization.JsonSerializable(typeof(string[]))]
 internal partial class WatchSelectionJsonContext : System.Text.Json.Serialization.JsonSerializerContext { }
+
+/// <summary>
+/// Selection-side mirror of <see cref="WatchMarkJsonOptions"/>: same
+/// UnsafeRelaxedJsonEscaping relaxation. Selection paths are usually ASCII
+/// today but future path schemes may carry CJK or symbols (e.g. path
+/// predicates referencing element text), so keep the two sides in sync.
+/// </summary>
+internal static class WatchSelectionJsonOptions
+{
+    public static readonly System.Text.Json.JsonSerializerOptions Relaxed =
+        new(WatchSelectionJsonContext.Default.Options)
+        {
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        };
+
+    public static readonly System.Text.Json.Serialization.Metadata.JsonTypeInfo<string[]> StringArrayInfo =
+        (System.Text.Json.Serialization.Metadata.JsonTypeInfo<string[]>)Relaxed.GetTypeInfo(typeof(string[]));
+}

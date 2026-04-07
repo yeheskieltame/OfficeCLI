@@ -56,7 +56,11 @@ public partial class WordHandler
             if (replace == null && formatProps.Count == 0 && paraProps.Count == 0)
                 throw new ArgumentException("'find' requires either 'replace' and/or format properties (e.g. bold, highlight, color).");
 
-            // Support regex=true as an alternative to r"..." prefix
+            // CONSISTENCY(find-regex): canonical site for the `regex=true` → `r"..."`
+            // raw-string normalization. `mark` and the other handlers' Set paths all
+            // copy this pattern verbatim. To change the find/regex protocol,
+            // grep "CONSISTENCY(find-regex)" and update every site project-wide;
+            // do not diverge in a single handler.
             if (properties.TryGetValue("regex", out var regexFlag) && ParseHelpers.IsTruthySafe(regexFlag) && !findText.StartsWith("r\"") && !findText.StartsWith("r'"))
                 findText = $"r\"{findText}\"";
 

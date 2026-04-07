@@ -130,6 +130,9 @@ static partial class CommandBuilder
         // Register commands from partial files
         rootCommand.Add(BuildWatchCommand());
         rootCommand.Add(BuildUnwatchCommand());
+        rootCommand.Add(BuildMarkCommand(jsonOption));
+        rootCommand.Add(BuildUnmarkMarkCommand(jsonOption));
+        rootCommand.Add(BuildGetMarksCommand(jsonOption));
         rootCommand.Add(BuildViewCommand(jsonOption));
         rootCommand.Add(BuildGetCommand(jsonOption));
         rootCommand.Add(BuildQueryCommand(jsonOption));

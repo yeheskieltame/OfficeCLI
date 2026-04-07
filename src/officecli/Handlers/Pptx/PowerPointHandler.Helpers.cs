@@ -1636,7 +1636,9 @@ public partial class PowerPointHandler
         if (paragraphs.Count == 0)
             throw new ArgumentException($"No paragraphs found at path: {parentPath}");
 
-        // Support regex=true prop as alternative to r"..." prefix
+        // Support regex=true prop as alternative to r"..." prefix.
+        // CONSISTENCY(find-regex): mirror of WordHandler.Set.cs:60-61. grep
+        // "CONSISTENCY(find-regex)" for every project-wide call site.
         if (properties.TryGetValue("regex", out var regexFlag) && ParseHelpers.IsTruthySafe(regexFlag) && !findValue.StartsWith("r\"") && !findValue.StartsWith("r'"))
             findValue = $"r\"{findValue}\"";
 

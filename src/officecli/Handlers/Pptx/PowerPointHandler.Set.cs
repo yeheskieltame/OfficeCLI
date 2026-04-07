@@ -49,7 +49,9 @@ public partial class PowerPointHandler
             if (replace == null && formatProps.Count == 0)
                 throw new ArgumentException("'find' requires either 'replace' and/or format properties (e.g. bold, color, size).");
 
-            // Support regex=true as an alternative to r"..." prefix
+            // Support regex=true as an alternative to r"..." prefix.
+            // CONSISTENCY(find-regex): mirror of WordHandler.Set.cs:60-61. grep
+            // "CONSISTENCY(find-regex)" for every project-wide call site.
             if (properties.TryGetValue("regex", out var regexFlag) && ParseHelpers.IsTruthySafe(regexFlag) && !findText.StartsWith("r\"") && !findText.StartsWith("r'"))
                 findText = $"r\"{findText}\"";
 
