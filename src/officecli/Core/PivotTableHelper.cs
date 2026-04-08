@@ -4836,6 +4836,29 @@ internal static class PivotTableHelper
         var filterFieldIndices = changes.ContainsKey("filters")
             ? ParseFieldListWithWarning(changes, "filters", headers)
             : currentFilters;
+
+        // CONSISTENCY(field-area-dedup): a field cannot be in two axes at
+        // once. When a Set call moves a field into one axis, it must drop
+        // out of any other axis it currently sits on. Without this dedup,
+        // `set rows=X` can leave X in both currentCols and the new rows
+        // list, which Excel renders as a corrupt pivotTableDefinition.
+        // Precedence: the most-recently-set axis wins; areas not touched
+        // in this Set call shed any field that was just claimed elsewhere.
+        if (changes.ContainsKey("rows"))
+        {
+            colFieldIndices = colFieldIndices.Where(i => !rowFieldIndices.Contains(i)).ToList();
+            filterFieldIndices = filterFieldIndices.Where(i => !rowFieldIndices.Contains(i)).ToList();
+        }
+        if (changes.ContainsKey("cols"))
+        {
+            rowFieldIndices = rowFieldIndices.Where(i => !colFieldIndices.Contains(i)).ToList();
+            filterFieldIndices = filterFieldIndices.Where(i => !colFieldIndices.Contains(i)).ToList();
+        }
+        if (changes.ContainsKey("filters"))
+        {
+            rowFieldIndices = rowFieldIndices.Where(i => !filterFieldIndices.Contains(i)).ToList();
+            colFieldIndices = colFieldIndices.Where(i => !filterFieldIndices.Contains(i)).ToList();
+        }
         var valueFields = changes.ContainsKey("values")
             ? ParseValueFieldsWithWarning(changes, "values", headers)
             : currentValues;
