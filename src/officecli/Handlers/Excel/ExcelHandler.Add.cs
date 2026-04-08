@@ -2102,7 +2102,9 @@ public partial class ExcelHandler
 
         if (segments.Length < 2)
         {
-            // Move (reorder) the sheet within the workbook
+            // Move (reorder) the sheet within the workbook.
+            // CONSISTENCY(move-anchor): mirrors PowerPointHandler.Move slide reorder —
+            // supports --index / --after /Sheet2 / --before /Sheet3.
             var workbook = GetWorkbook();
             var sheets = workbook.GetFirstChild<Sheets>()
                 ?? throw new InvalidOperationException("Workbook has no sheets element");
@@ -2110,13 +2112,49 @@ public partial class ExcelHandler
                 string.Equals(s.Name?.Value, sheetName, StringComparison.OrdinalIgnoreCase))
                 ?? throw new ArgumentException($"Sheet not found: {sheetName}");
 
-            var targetIndex = index ?? throw new ArgumentException("--index is required when moving a sheet");
+            // Resolve after/before anchor BEFORE removing sheetEl.
+            static string ExtractAnchorSheetName(string raw) =>
+                (raw.StartsWith("/") ? raw[1..] : raw).Split('/', 2)[0];
+
+            Sheet? afterAnchor = null, beforeAnchor = null;
+            if (position?.After != null)
+            {
+                var anchorName = ExtractAnchorSheetName(position.After);
+                afterAnchor = sheets.Elements<Sheet>().FirstOrDefault(s =>
+                    string.Equals(s.Name?.Value, anchorName, StringComparison.OrdinalIgnoreCase))
+                    ?? throw new ArgumentException($"After anchor not found: {position.After}");
+            }
+            else if (position?.Before != null)
+            {
+                var anchorName = ExtractAnchorSheetName(position.Before);
+                beforeAnchor = sheets.Elements<Sheet>().FirstOrDefault(s =>
+                    string.Equals(s.Name?.Value, anchorName, StringComparison.OrdinalIgnoreCase))
+                    ?? throw new ArgumentException($"Before anchor not found: {position.Before}");
+            }
+            else if (index == null)
+            {
+                throw new ArgumentException("One of --index, --after, or --before is required when moving a sheet");
+            }
+
             sheetEl.Remove();
-            var sheetList = sheets.Elements<Sheet>().ToList();
-            if (targetIndex >= 0 && targetIndex < sheetList.Count)
-                sheetList[targetIndex].InsertBeforeSelf(sheetEl);
+
+            if (afterAnchor != null)
+            {
+                afterAnchor.InsertAfterSelf(sheetEl);
+            }
+            else if (beforeAnchor != null)
+            {
+                beforeAnchor.InsertBeforeSelf(sheetEl);
+            }
             else
-                sheets.AppendChild(sheetEl);
+            {
+                var targetIndex = index!.Value;
+                var sheetList = sheets.Elements<Sheet>().ToList();
+                if (targetIndex >= 0 && targetIndex < sheetList.Count)
+                    sheetList[targetIndex].InsertBeforeSelf(sheetEl);
+                else
+                    sheets.AppendChild(sheetEl);
+            }
             workbook.Save();
             return $"/{sheetName}";
         }
